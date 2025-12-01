@@ -1,0 +1,43 @@
+# # 4-layer 2-column wall structure (8 bricks)
+# goal_layout:
+#   # Level 0
+#   level_0:
+#     positions:
+#       - [0.30, 0.40]
+#       - [0.52, 0.40]
+#   # Level 1
+#   level_1:
+#     positions:
+#       - [0.30, 0.40]
+#       - [0.52, 0.40]
+#   # Level 2
+#   level_2:
+#     positions:
+#       - [0.30, 0.40]
+#       - [0.52, 0.40]
+#   # Level 3
+#   level_3:
+#     positions:
+#       - [0.30, 0.40]
+#       - [0.52, 0.40]
+
+
+
+
+# ## Three-layer Pyramid
+# goal_layout:
+#   # Level 0: 3 bricks - Horizontally arranged as base, spacing sufficient for gripper operation
+#   level_0:
+#     positions:
+#       - [0.20, 0.40]  # Left base brick
+#       - [0.45, 0.40]  # Middle base brick (X spacing 0.15m = brick length 0.20m - 0.05m overlap)
+#       - [0.70, 0.40]  # Right base brick (X spacing 0.15m)
+#   # Level 1: 2 bricks - Stacked directly on top of base bricks
+#   level_1:
+#     positions:
+#       - [0.325, 0.40]  # Left middle brick (Above junction of left and middle base bricks)
+#       - [0.575, 0.40]  # Right middle brick (Above junction of middle and right base bricks)
+#   # Level 2: 1 brick - Stacked directly on top of middle bricks
+#   level_2:
+#     positions:
+#       - [0.45, 0.40]  # Top brick (Above center of two middle bricks)

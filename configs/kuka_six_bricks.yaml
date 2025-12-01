@@ -1,0 +1,169 @@
+robot:
+  sdf_path: "kuka_iiwa/kuka_with_gripper2.sdf"
+  ee_link_name_hint: "base_link"
+  gripper_finger_name_keywords: ["finger", "tip"]
+  default_open: 0.06  # Opening distance adapted for complex six-brick tasks
+  default_close: 0.00
+
+control:
+  joint_velocity_limit: 1.2
+  joint_acc_limit: 2.5
+  ik_max_iters: 300
+  ik_pos_tolerance: 0.0002
+  ik_ori_tolerance: 0.005
+
+scene:
+  gravity: -9.8
+  time_step: 0.0041667
+  plane: true
+  table: false
+  friction:
+    ground: 3     # Ground friction
+    brick: 1.5    # Friction between bricks
+    finger: 0.9   # Gripper friction
+
+brick:
+  size_LWH: [0.20, 0.095, 0.06]
+  color_rgba: [0.8, 0.1, 0.1, 1.0]
+  mass: 1.5
+  # Spawn positions for six bricks - Optimized grid distribution within workspace
+  # X spacing 0.30m, Y coordinate controlled within workspace (-0.55 to 0.55), ensuring sufficient gripper operating space
+  spawn_xy_list:
+    - [0.00007, -0.45]  
+    - [0.30007, -0.45] 
+    - [0.60007, -0.45] 
+    - [0.00007, -0.60] 
+    - [0.30007, -0.60]  
+    - [0.60007, -0.60] 
+    - [-0.30007, -0.45] 
+    - [-0.30007, -0.60]
+  spawn_xy: [0.55, -0.20]
+
+
+
+
+# Goal layout definition for six bricks - 3-layer 2-column wall structure
+goal_layout:
+  level_0:
+    positions:
+      - [0.30, 0.40]  # 1st column
+      - [0.52, 0.40]  # 2nd column (X spacing 0.20m = brick length, no overlap)
+  
+  # Level 1: 2 bricks - Stacked on top of Level 0
+  level_1:
+    positions:
+      - [0.30, 0.40]  # 1st column (Directly above Level 0 1st column)
+      - [0.52, 0.40]  # 2nd column (Directly above Level 0 2nd column)
+
+  # Level 2: 2 bricks - Stacked on top of Level 1
+  level_2:
+    positions:
+      - [0.30, 0.40]  # 1st column (Directly above Level 1 1st column)
+      - [0.52, 0.40]  # 2nd column (Directly above Level 1 2nd column)
+
+
+goal:
+  offset_xy: [0.70, 0.20]  # Default offset (backup)
+  yaw: 0.0
+
+gripper_geom:
+  tip_length_guess: 0.06
+  finger_depth: 0.060
+  ground_margin: 0.003
+  max_sym_open_rad: 1.2
+  open_clearance: 0.030
+  max_open: 0.18
+
+clearance:
+  approach: 0.15
+  pad: 0.005
+  lift: 0.18
+  place_gap: 0.06
+  width_pad: 0.015
+  # Release strategy parameters (Optimized for six bricks)
+  release_above: 0.008
+  release_open_extra: 0.035
+  release_retry_extra: 0.005
+  release_max_extra: 0.060
+  use_quick_sync_release: true
+  use_force_feedback_release: true
+  # Gradual release optimization parameters
+  gradual_open_step: 0.003
+  gradual_wait_time: 0.10
+  displacement_check_interval: 2
+  max_allowed_displacement: 0.003
+  release_force_threshold: 300
+  release_max_iterations: 120
+
+# Baseline mode configuration - Simplified strategy switch
+baseline:
+  enabled: true  # Set to true to enable baseline mode (disable force feedback and angle correction)
+  description: "Baseline mode: Direct descent placement, no force feedback or angle correction"
+  # Simplified strategies in Baseline mode
+  skip_collision_detection: true   # Skip collision detection, go directly to target position
+  skip_force_feedback: true        # Skip force feedback release
+  skip_angle_correction: true      # Skip angle optimization correction
+  direct_release_gap: 0.05         # Fixed gap for direct release (meters)
+
+home_pose_xyz: [0.55, 0.00, 0.55]
+
+debug:
+  show_phase_text: false
+  draw_tcp_axes: true
+  axes_len: 0.10
+  text_lifetime: 1.2
+  text_color: [1.0, 1.0, 0.2]
+  text_pos: [0.0, -0.6, 1.0]
+
+# Monitoring configuration
+monitoring:
+  enabled: true
+  output_dir: "monitoring_logs"
+
+timing:
+  move_per_phase_sec: 0.8  # Increase move time to ensure stability
+  settle_sec: 0.4
+  # New: Simulation flow wait time (seconds)
+  brick_settle_sec: 2.0       # Settle time after brick placement (was 480 steps)
+  reset_wait_sec: 1.5         # Reset wait time between tasks (was 360 steps)
+  final_wait_sec: 10.0        # Final display time after completion (was 2400 steps)
+  # New: Action micro-operation wait time (seconds)
+  gripper_close_wait_sec: 0.25
+  gripper_open_wait_sec: 0.15
+  reattach_wait_sec: 0.05
+  release_wait_sec: 0.06
+  final_widen_wait_sec: 0.08
+
+# New: Orientation control and detection thresholds
+orientation:
+  alignment_threshold: 0.95       # Bottom parallel detection threshold (cos theta)
+  roll_check_threshold_deg: 30.0  # Brick roll detection threshold (degrees)
+  tcp_change_warning_deg: 45.0    # TCP large rotation warning threshold (degrees)
+
+assist_grasp:
+  enabled: true
+  contact_gate: true
+  require_both_fingers: true
+  min_contacts_total: 2
+
+verify:
+  tol_z: 0.010
+  tol_xy: 0.120  
+  lift_success_dz: 0.008
+  max_retries_per_phase: 3
+  recentre_step_xy: 0.008
+  recalc_tip_after_pregrasp: true
+  tcp_z_down_cos_thresh: 0.90
+  tcp_ex_align_cos_thresh: 0.85
+  allow_tcp_ex_fallback: true
+  allow_geo_as_fallback: true
+  verbose: true
+  max_global_restarts: 5
+
+llm:
+  enabled: false
+  mode: "multi_agent"  # mode: "multi_agent" or "single_agent" 
+  client: "openai"
+  model: "gpt-4o-mini"
+  temperature: 0.0  
+  api_key: "None"
