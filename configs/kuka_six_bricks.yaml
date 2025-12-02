@@ -161,9 +161,9 @@ verify:
   max_global_restarts: 5
 
 llm:
-  enabled: false
+  enabled: true
   mode: "multi_agent"  # mode: "multi_agent" or "single_agent" 
   client: "openai"
   model: "gpt-4o-mini"
   temperature: 0.0  
-  api_key: "None"
+  api_key: "none"
