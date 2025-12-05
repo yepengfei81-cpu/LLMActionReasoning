@@ -207,6 +207,40 @@ class BulletEnv:
             
         return state
 
+    def get_brick_dependencies(self) -> dict:
+        if not hasattr(self, "layout_targets"):
+            self._parse_layout()
+        
+        L, W, H = self.cfg["brick"]["size_LWH"]
+        dependencies = {}
+        
+        for i, target in enumerate(self.layout_targets):
+            current_level = target["level"]
+            current_xy = target["xy"]
+            
+            if current_level == 0:
+                dependencies[i] = []
+            else:
+                deps = []
+                for j, other_target in enumerate(self.layout_targets):
+                    if other_target["level"] == current_level - 1:
+                        other_xy = other_target["xy"]
+                        dx = abs(current_xy[0] - other_xy[0])
+                        dy = abs(current_xy[1] - other_xy[1])
+                        
+                        if dx < L and dy < W:
+                            deps.append(j)           
+                dependencies[i] = deps  
+        return dependencies
+
+    def get_brick_level(self, brick_idx: int) -> int:
+        if not hasattr(self, "layout_targets"):
+            self._parse_layout()
+        
+        if brick_idx < len(self.layout_targets):
+            return self.layout_targets[brick_idx]["level"]
+        return 0
+    
     def get_ground_top(self):
         return self._ground_top_z()
 
