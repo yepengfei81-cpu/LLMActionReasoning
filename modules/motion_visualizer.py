@@ -49,13 +49,13 @@ class MotionVisualizer:
             theta_last = self.gripper.last_sym_theta()
         except Exception:
             theta_last = 0.0
-        print(
-            "[SNAP] {:<20s} tcp_z={:.3f}  bottom_z={:.3f}  tip={:.3f}  gap={:.3f}  "
-            "θ_last={:.3f}rad ({:.1f}°)  L(deg)=[{}]  R(deg)=[{}]  attached={}  contacts={}".format(
-                label, s["tcp_z"], s["finger_bottom_z"], s["finger_tip_len"], s["gap"],
-                theta_last, _m.degrees(theta_last),
-                ",".join(f"{d:+.1f}" for d in left_deg),
-                ",".join(f"{d:+.1f}" for d in right_deg),
-                s["attached"], s["contacts"]
-            )
-        )
+        # print(
+        #     "[SNAP] {:<20s} tcp_z={:.3f}  bottom_z={:.3f}  tip={:.3f}  gap={:.3f}  "
+        #     "θ_last={:.3f}rad ({:.1f}°)  L(deg)=[{}]  R(deg)=[{}]  attached={}  contacts={}".format(
+        #         label, s["tcp_z"], s["finger_bottom_z"], s["finger_tip_len"], s["gap"],
+        #         theta_last, _m.degrees(theta_last),
+        #         ",".join(f"{d:+.1f}" for d in left_deg),
+        #         ",".join(f"{d:+.1f}" for d in right_deg),
+        #         s["attached"], s["contacts"]
+        #     )
+        # )

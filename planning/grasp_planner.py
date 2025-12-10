@@ -17,8 +17,8 @@ def get_precise_brick_state(env, brick_id):
     state = env.get_brick_state(brick_id=brick_id, include_aabb=True)
     
     # Print debug info
-    print(f"[ImpGrasp] Brick #{brick_id} original pos: {state['pos']}")
-    print(f"[ImpGrasp] Brick #{brick_id} AABB center: ({state['aabb_center'][0]:.6f}, {state['aabb_center'][1]:.6f}, {state['aabb_center'][2]:.6f})")
+    # print(f"[ImpGrasp] Brick #{brick_id} original pos: {state['pos']}")
+    # print(f"[ImpGrasp] Brick #{brick_id} AABB center: ({state['aabb_center'][0]:.6f}, {state['aabb_center'][1]:.6f}, {state['aabb_center'][2]:.6f})")
     
     # Convert to original format for compatibility
     return {
@@ -51,9 +51,9 @@ def calculate_optimal_grasp_direction(brick_state, brick_size_LWH):
     # Use unified angle normalization function
     optimal_grasp_angle = normalize_angle(optimal_grasp_angle)
     
-    print(f"[ImpGrasp] Brick yaw: {math.degrees(byaw):.1f}°")
-    print(f"[ImpGrasp] Long edge angle: {math.degrees(long_edge_angle):.1f}°")
-    print(f"[ImpGrasp] Optimal grasp angle: {math.degrees(optimal_grasp_angle):.1f}°")
+    # print(f"[ImpGrasp] Brick yaw: {math.degrees(byaw):.1f}°")
+    # print(f"[ImpGrasp] Long edge angle: {math.degrees(long_edge_angle):.1f}°")
+    # print(f"[ImpGrasp] Optimal grasp angle: {math.degrees(optimal_grasp_angle):.1f}°")
     
     return optimal_grasp_angle, "Grasp from short edge"
 
@@ -99,14 +99,14 @@ def plan_improved_grasp(
     
     if target_grasp_z < min_safe_z:
         min_grasp = min_safe_z
-        print(f"[ImpGrasp] Grasp height adjusted to safe lower limit: {min_grasp:.3f}m")
+        # print(f"[ImpGrasp] Grasp height adjusted to safe lower limit: {min_grasp:.3f}m")
     elif target_grasp_z > max_safe_z:
         min_grasp = max_safe_z
-        print(f"[ImpGrasp] Grasp height adjusted to effective upper limit: {min_grasp:.3f}m")
+        # print(f"[ImpGrasp] Grasp height adjusted to effective upper limit: {min_grasp:.3f}m")
     else:
         min_grasp = target_grasp_z
         
-    print(f"[ImpGrasp] Brick bottom: {brick_bottom_z:.3f}m, Center: {brick_center_z:.3f}m, Target grasp: {min_grasp:.3f}m")
+    # print(f"[ImpGrasp] Brick bottom: {brick_bottom_z:.3f}m, Center: {brick_center_z:.3f}m, Target grasp: {min_grasp:.3f}m")
     
     # Lift height
     min_lift = z_top + lift_clearance
@@ -122,10 +122,10 @@ def plan_improved_grasp(
     z_ee_pre_place = min_pre_place + tip_length_guess
     z_ee_place = min_place + tip_length_guess
     
-    print(f"[ImpGrasp] Grasp strategy: {grasp_desc}")
-    print(f"[ImpGrasp] Pre-grasp height: {z_ee_pre:.3f}m")
-    print(f"[ImpGrasp] Grasp height: {z_ee_grasp:.3f}m")
-    print(f"[ImpGrasp] Lift height: {z_ee_lift:.3f}m")
+    # print(f"[ImpGrasp] Grasp strategy: {grasp_desc}")
+    # print(f"[ImpGrasp] Pre-grasp height: {z_ee_pre:.3f}m")
+    # print(f"[ImpGrasp] Grasp height: {z_ee_grasp:.3f}m")
+    # print(f"[ImpGrasp] Lift height: {z_ee_lift:.3f}m")
     
 
     wps = [

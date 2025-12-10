@@ -1,2 +1,3 @@
 # API Keys and Secrets
 configs/kuka_six_bricks.yaml
+modules/__pycache__

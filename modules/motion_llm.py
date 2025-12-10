@@ -39,7 +39,7 @@ class MotionLLMHandler:
             self.llm_agent = LLMPlanner(client=client, enabled=True, mode=llm_mode)
             print(f"[LLM] Initialization complete - Mode: {llm_mode}")
         else:
-            print(f"[WARN] Unsupported LLM client: {client_type}")
+            # print(f"[WARN] Unsupported LLM client: {client_type}")
             self.llm_agent = None
 
     def _brick_xy_yaw(self):
@@ -142,9 +142,9 @@ class MotionLLMHandler:
         try:
             result = self.llm_agent.plan_pre_grasp(context, 0, None)
             llm_pose = result["pose"]
-            print(f"[LLM DEBUG] Real brick position: ({bx:.6f}, {by:.6f}, {bz:.6f})")
-            print(f"[LLM DEBUG] Want TCP z: {want_tcp_z:.6f}")
-            print(f"[LLM DEBUG] LLM output: xyz=({llm_pose['xyz'][0]:.6f}, {llm_pose['xyz'][1]:.6f}, {llm_pose['xyz'][2]:.6f})")
+            # print(f"[LLM DEBUG] Real brick position: ({bx:.6f}, {by:.6f}, {bz:.6f})")
+            # print(f"[LLM DEBUG] Want TCP z: {want_tcp_z:.6f}")
+            # print(f"[LLM DEBUG] LLM output: xyz=({llm_pose['xyz'][0]:.6f}, {llm_pose['xyz'][1]:.6f}, {llm_pose['xyz'][2]:.6f})")
             return {
                 "pose": llm_pose,
                 "llm_result": result,
@@ -175,9 +175,9 @@ class MotionLLMHandler:
         
         try:
             result = self.llm_agent.plan_descend(context, 0, None)
-            print(f"[LLM_DESCEND] Using LLM planned descend:")
-            print(f"[LLM_DESCEND] Target gap: {result['target_gap']:.6f}m")
-            print(f"[LLM_DESCEND] TCP target: ({result['pose']['xyz'][0]:.6f}, {result['pose']['xyz'][1]:.6f}, {result['pose']['xyz'][2]:.6f})")
+            # print(f"[LLM_DESCEND] Using LLM planned descend:")
+            # print(f"[LLM_DESCEND] Target gap: {result['target_gap']:.6f}m")
+            # print(f"[LLM_DESCEND] TCP target: ({result['pose']['xyz'][0]:.6f}, {result['pose']['xyz'][1]:.6f}, {result['pose']['xyz'][2]:.6f})")
             return {
                 "pose": result["pose"],
                 "target_gap": result["target_gap"],
@@ -202,9 +202,9 @@ class MotionLLMHandler:
         
         try:
             result = self.llm_agent.plan_lift(context, 0, None)
-            print(f"[LLM_LIFT] Using LLM planned lift:")
-            print(f"[LLM_LIFT] Lift height: {result['lift_height']:.6f}m")
-            print(f"[LLM_LIFT] TCP target: ({result['pose']['xyz'][0]:.6f}, {result['pose']['xyz'][1]:.6f}, {result['pose']['xyz'][2]:.6f})")
+            # print(f"[LLM_LIFT] Using LLM planned lift:")
+            # print(f"[LLM_LIFT] Lift height: {result['lift_height']:.6f}m")
+            # print(f"[LLM_LIFT] TCP target: ({result['pose']['xyz'][0]:.6f}, {result['pose']['xyz'][1]:.6f}, {result['pose']['xyz'][2]:.6f})")
             return {
                 "pose": result["pose"],
                 "lift_height": result["lift_height"],

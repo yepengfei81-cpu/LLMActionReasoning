@@ -128,9 +128,9 @@ class StateVerifier:
         ex_ok  = self.tcp_ex_align_width_ok(brick_yaw)
 
         ok = z_ok and xy_ok and down_ok and ex_ok
-        if self.cfg_v.get("verbose", True):
-            print(f"[PRE_GRASP] z_ok={z_ok} (z_min={z_min:.3f} want>={want:.3f}) "
-                  f"xy_ok={xy_ok} down_ok={down_ok} (ori={cos_ori:.3f} geo={cos_geo:.3f}) ex_ok={ex_ok}")
+        # if self.cfg_v.get("verbose", True):
+        #     print(f"[PRE_GRASP] z_ok={z_ok} (z_min={z_min:.3f} want>={want:.3f}) "
+        #           f"xy_ok={xy_ok} down_ok={down_ok} (ori={cos_ori:.3f} geo={cos_geo:.3f}) ex_ok={ex_ok}")
         return ok
 
     def check_descend_grasp(self, desired_bottom_z, tip_length_tcp, ground_id, brick_xy, brick_yaw=None):
@@ -143,9 +143,9 @@ class StateVerifier:
         exok = self.tcp_ex_align_width_ok(brick_yaw)
         gtouch = self.finger_touching_ground(ground_id)
         ok = ok_h and (not gtouch) and xyok and downok and exok
-        if self.cfg_v.get("verbose", True):
-            print(f"[DESCEND] z_ok={ok_h} (z_min={z_min:.3f} want={desired_bottom_z:.3f}) "
-                  f"xy_ok={xyok} down_ok={downok} ex_ok={exok} finger_touch_ground={gtouch}")
+        # if self.cfg_v.get("verbose", True):
+        #     print(f"[DESCEND] z_ok={ok_h} (z_min={z_min:.3f} want={desired_bottom_z:.3f}) "
+        #           f"xy_ok={xyok} down_ok={downok} ex_ok={exok} finger_touch_ground={gtouch}")
         return ok
 
     def check_close(self, assist_cfg):

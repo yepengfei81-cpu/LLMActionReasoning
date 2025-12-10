@@ -92,16 +92,16 @@ class GripperHelper:
             for jR in candR:
                 for sL, sR in [(+1,-1),(+1,+1),(-1,-1),(-1,+1)]:
                     s = _slope(jL, jR, sL, sR, delta=0.02)
-                    if verbose:
-                        print(f"[GAP] probe L={jL} R={jR} sign=({sL:+d},{sR:+d}) slope={s:+.4f} m/rad")
+                    # if verbose:
+                    #     print(f"[GAP] probe L={jL} R={jR} sign=({sL:+d},{sR:+d}) slope={s:+.4f} m/rad")
                     if (best is None) or (s > best[0]):
                         best = (s, jL, jR, sL, sR)
 
         slope, jL, jR, sL, sR = best if best else (0.0, candL[0], candR[0], +1, -1)
         g0 = self.rm.estimate_gap_width()
         if slope <= 1e-5:
-            if verbose:
-                print(f"[GAP] no effective pair (slope={slope:.3e}), keep current gap={g0:.3f}.")
+            # if verbose:
+            #     print(f"[GAP] no effective pair (slope={slope:.3e}), keep current gap={g0:.3f}.")
             return (g0 >= required_gap - tol), 0.0, g0, dict(pair=(jL,jR), slope=slope, signs=(sL,sR))
 
         baseL, baseR = self._joint_pos(jL), self._joint_pos(jR)
@@ -112,13 +112,13 @@ class GripperHelper:
         theta_conf = float(self.rm.cfg.get("gripper_geom", {}).get("max_sym_open_rad", 0.8))
         theta_hi = min(theta_lim, max(0.0, theta_conf))
         if theta_hi <= 1e-4:
-            if verbose:
-                print(f"[GAP] theta upper bound too small (lim={theta_lim:.4f}, conf={theta_conf:.4f}).")
+            # if verbose:
+            #     print(f"[GAP] theta upper bound too small (lim={theta_lim:.4f}, conf={theta_conf:.4f}).")
             return (g0 >= required_gap - tol), 0.0, g0, dict(pair=(jL,jR), slope=slope, signs=(sL,sR), theta_hi=theta_hi)
 
-        if verbose:
-            print(f"[GAP] pick L={jL} R={jR} signs=({sL:+d},{sR:+d}) slope={slope:.4f} "
-                  f"theta_hi={theta_hi:.3f} rad  g0={g0:.3f} need>={required_gap:.3f}")
+        # if verbose:
+        #     print(f"[GAP] pick L={jL} R={jR} signs=({sL:+d},{sR:+d}) slope={slope:.4f} "
+        #           f"theta_hi={theta_hi:.3f} rad  g0={g0:.3f} need>={required_gap:.3f}")
 
         lo, hi = 0.0, theta_hi
         ok, theta_best, gap_best = False, 0.0, g0
@@ -127,8 +127,8 @@ class GripperHelper:
             self._apply_pair(jL, jR, baseL, baseR, mid, sL, sR)
             self._settle(settle_sec)
             g = self.rm.estimate_gap_width()
-            if verbose:
-                print(f"[GAP] bisect it={it:02d} theta={mid:.4f}  gap={g:.3f}  need>={required_gap:.3f}")
+            # if verbose:
+            #     print(f"[GAP] bisect it={it:02d} theta={mid:.4f}  gap={g:.3f}  need>={required_gap:.3f}")
             theta_best, gap_best = mid, g
             if g >= required_gap - tol:
                 ok = True; hi = mid
@@ -141,8 +141,8 @@ class GripperHelper:
             self._settle(settle_sec)
             gap_best = self.rm.estimate_gap_width()
             theta_best = theta_hi
-            if verbose:
-                print(f"[GAP] cap by limits: theta={theta_hi:.4f}  gap_max={gap_best:.3f}  need>={required_gap:.3f}")
+            # if verbose:
+            #     print(f"[GAP] cap by limits: theta={theta_hi:.4f}  gap_max={gap_best:.3f}  need>={required_gap:.3f}")
 
         self._last_open_angle = float(theta_best)
         self._is_closed = False

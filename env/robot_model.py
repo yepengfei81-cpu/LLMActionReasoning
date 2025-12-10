@@ -225,7 +225,7 @@ class RobotModel:
         """Initialize TCP offset to zero, to be set by dynamic calibration later"""
         self.tcp_off_pos = [0.0, 0.0, 0.0]
         self.tcp_off_quat = [0.0, 0.0, 0.0, 1.0]
-        print(f"[TCP] TCP offset initialized to zero - will be calibrated dynamically")
+        # print(f"[TCP] TCP offset initialized to zero - will be calibrated dynamically")
 
     def estimate_finger_depth(self, fallback=None):
         if fallback is None:

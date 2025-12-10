@@ -43,17 +43,17 @@ class AngleOptimizer:
     def optimize_placement_angle(self, brick_id: int, target_yaw: float, 
                                 gripper_controller, tcp_position: Tuple[float, float, float],
                                 verbose: bool = True) -> Tuple[bool, float, List[Dict]]:
-        if verbose:
-            print(f"[ANGLE_OPT] Starting angle optimization, target: {math.degrees(target_yaw):.2f}°")
+        # if verbose:
+        #     print(f"[ANGLE_OPT] Starting angle optimization, target: {math.degrees(target_yaw):.2f}°")
         
         # Check if it is a stacking scenario
         is_stacking = self.is_stacking_placement(brick_id)
         effective_tolerance = self.get_effective_tolerance(brick_id)
         force_multiplier = self.stacking_force_multiplier if is_stacking else 1.0
         
-        if verbose:
-            placement_type = "Stacking" if is_stacking else "Base layer"
-            print(f"[ANGLE_OPT] {placement_type} placement, angle tolerance: {math.degrees(effective_tolerance):.1f}°")
+        # if verbose:
+        #     placement_type = "Stacking" if is_stacking else "Base layer"
+            # print(f"[ANGLE_OPT] {placement_type} placement, angle tolerance: {math.degrees(effective_tolerance):.1f}°")
         
         optimization_data = []
         
@@ -70,15 +70,15 @@ class AngleOptimizer:
                 'angle_error_rad': angle_error
             }
             
-            if verbose:
-                print(f"[ANGLE_OPT] Iter {iteration}: current={math.degrees(current_yaw):.2f}°, "
-                      f"error={math.degrees(angle_error):.2f}°")
+            # if verbose:
+            #     print(f"[ANGLE_OPT] Iter {iteration}: current={math.degrees(current_yaw):.2f}°, "
+            #           f"error={math.degrees(angle_error):.2f}°")
             
             if abs(angle_error) < effective_tolerance:
                 step_data['converged'] = True
                 optimization_data.append(step_data)
-                if verbose:
-                    print(f"[ANGLE_OPT] Converged! Final error: {math.degrees(angle_error):.2f}°")
+                # if verbose:
+                #     print(f"[ANGLE_OPT] Converged! Final error: {math.degrees(angle_error):.2f}°")
                 return True, angle_error, optimization_data
             
             # If error is too small, skip correcting
@@ -97,8 +97,8 @@ class AngleOptimizer:
             optimization_data.append(step_data)
             
             if not correction_success:
-                if verbose:
-                    print(f"[ANGLE_OPT] Failed to apply correction at iteration {iteration}")
+                # if verbose:
+                #     print(f"[ANGLE_OPT] Failed to apply correction at iteration {iteration}")
                 break
             
             for _ in range(10):
@@ -109,9 +109,9 @@ class AngleOptimizer:
         
         success = abs(final_error) < effective_tolerance
         
-        if verbose:
-            print(f"[ANGLE_OPT] Optimization {'succeeded' if success else 'failed'}. "
-                  f"Final error: {math.degrees(final_error):.2f}°")
+        # if verbose:
+        #     print(f"[ANGLE_OPT] Optimization {'succeeded' if success else 'failed'}. "
+        #           f"Final error: {math.degrees(final_error):.2f}°")
         
         return success, final_error, optimization_data
     
@@ -126,8 +126,8 @@ class AngleOptimizer:
             correction_magnitude = min(abs(angle_error), self.correction_step_size)
             correction_direction = 1 if angle_error > 0 else -1
             
-            if verbose:
-                print(f"[ANGLE_OPT] Applying correction: {math.degrees(correction_magnitude * correction_direction):.2f}°")
+            # if verbose:
+            #     print(f"[ANGLE_OPT] Applying correction: {math.degrees(correction_magnitude * correction_direction):.2f}°")
 
             current_gap = gripper_controller.last_sym_theta() * 0.2 
             
@@ -184,8 +184,8 @@ class AngleOptimizer:
             return True
             
         except Exception as e:
-            if verbose:
-                print(f"[ANGLE_OPT] Error applying correction: {e}")
+            # if verbose:
+            #     print(f"[ANGLE_OPT] Error applying correction: {e}")
             return False
     
 
@@ -194,7 +194,7 @@ class AngleOptimizer:
         """
         Enhanced release, combining angle control and force feedback
         """
-        print("[ANGLE_OPT] Starting enhanced release with angle control...")
+        # print("[ANGLE_OPT] Starting enhanced release with angle control...")
         
         # Pre-optimize angle
         pre_optimization_success, pre_error, pre_data = self.optimize_placement_angle(
@@ -206,7 +206,7 @@ class AngleOptimizer:
             force_success, final_gap = gripper_controller.force_feedback_release(brick_id, vf_checker)
             force_data = []  
         except Exception as e:
-            print(f"[ANGLE_OPT] Force feedback error: {e}, using standard release")
+            # print(f"[ANGLE_OPT] Force feedback error: {e}, using standard release")
             force_success = True
             final_gap = 0.15
             force_data = []
@@ -240,7 +240,7 @@ class AngleOptimizer:
             'final_angle_error_deg': math.degrees(post_error)
         }
         
-        print(f"[ANGLE_OPT] Enhanced release {'succeeded' if final_success else 'failed'}. "
-              f"Final angle error: {math.degrees(post_error):.2f}°")
+        # print(f"[ANGLE_OPT] Enhanced release {'succeeded' if final_success else 'failed'}. "
+        #       f"Final angle error: {math.degrees(post_error):.2f}°")
         
         return final_success, post_error, optimization_summary

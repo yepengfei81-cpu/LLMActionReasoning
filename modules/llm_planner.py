@@ -328,15 +328,15 @@ class LLMPlanner:
         result = self._postprocess_descend(raw, [bx, by, bz], want_tcp_z, required_gap, plan_pose)
         
         # Debug output
-        print(f"[LLM_DESCEND] ===== LLM Descend Planning Results =====")
-        print(f"[LLM_DESCEND] Brick position: ({bx:.6f}, {by:.6f}, {bz:.6f})")
-        print(f"[LLM_DESCEND] Brick width W: {W:.6f}m")
-        print(f"[LLM_DESCEND] Required gap: {required_gap:.6f}m")
-        print(f"[LLM_DESCEND] Desired finger bottom: {desired_bottom:.6f}m")
-        print(f"[LLM_DESCEND] Want TCP z: {want_tcp_z:.6f}m")
-        print(f"[LLM_DESCEND] LLM output TCP: xyz=({result['pose']['xyz'][0]:.6f}, {result['pose']['xyz'][1]:.6f}, {result['pose']['xyz'][2]:.6f})")
-        print(f"[LLM_DESCEND] LLM target gap: {result['target_gap']:.6f}m")
-        print(f"[LLM_DESCEND] Source: {result.get('source', 'llm')}")
+        # print(f"[LLM_DESCEND] ===== LLM Descend Planning Results =====")
+        # print(f"[LLM_DESCEND] Brick position: ({bx:.6f}, {by:.6f}, {bz:.6f})")
+        # print(f"[LLM_DESCEND] Brick width W: {W:.6f}m")
+        # print(f"[LLM_DESCEND] Required gap: {required_gap:.6f}m")
+        # print(f"[LLM_DESCEND] Desired finger bottom: {desired_bottom:.6f}m")
+        # print(f"[LLM_DESCEND] Want TCP z: {want_tcp_z:.6f}m")
+        # print(f"[LLM_DESCEND] LLM output TCP: xyz=({result['pose']['xyz'][0]:.6f}, {result['pose']['xyz'][1]:.6f}, {result['pose']['xyz'][2]:.6f})")
+        # print(f"[LLM_DESCEND] LLM target gap: {result['target_gap']:.6f}m")
+        # print(f"[LLM_DESCEND] Source: {result.get('source', 'llm')}")
         
         return {"pose": result["pose"], "target_gap": result["target_gap"], "raw": raw, "source": result.get("source", "llm")}
 
@@ -456,14 +456,14 @@ class LLMPlanner:
         result = self._postprocess_lift(raw, [bx, by, bz], want_tcp_z, current_rpy, plan_pose)
         
         # Debug output
-        print(f"[LLM_LIFT] ===== LLM Lift Planning Results =====")
-        print(f"[LLM_LIFT] Brick position: ({bx:.6f}, {by:.6f}, {bz:.6f})")
-        print(f"[LLM_LIFT] Brick top z: {z_top:.6f}m")
-        print(f"[LLM_LIFT] Lift clearance: {lift_clearance:.6f}m")
-        print(f"[LLM_LIFT] Want TCP z: {want_tcp_z:.6f}m")
-        print(f"[LLM_LIFT] LLM output TCP: xyz=({result['pose']['xyz'][0]:.6f}, {result['pose']['xyz'][1]:.6f}, {result['pose']['xyz'][2]:.6f})")
-        print(f"[LLM_LIFT] LLM lift height: {result['lift_height']:.6f}m")
-        print(f"[LLM_LIFT] Source: {result.get('source', 'llm')}")
+        # print(f"[LLM_LIFT] ===== LLM Lift Planning Results =====")
+        # print(f"[LLM_LIFT] Brick position: ({bx:.6f}, {by:.6f}, {bz:.6f})")
+        # print(f"[LLM_LIFT] Brick top z: {z_top:.6f}m")
+        # print(f"[LLM_LIFT] Lift clearance: {lift_clearance:.6f}m")
+        # print(f"[LLM_LIFT] Want TCP z: {want_tcp_z:.6f}m")
+        # print(f"[LLM_LIFT] LLM output TCP: xyz=({result['pose']['xyz'][0]:.6f}, {result['pose']['xyz'][1]:.6f}, {result['pose']['xyz'][2]:.6f})")
+        # print(f"[LLM_LIFT] LLM lift height: {result['lift_height']:.6f}m")
+        # print(f"[LLM_LIFT] Source: {result.get('source', 'llm')}")
         
         return {
             "pose": result["pose"], 
@@ -1234,7 +1234,7 @@ Your output will directly control gripper opening and retreat sequence for safe 
             return result
         
         except Exception as e:
-            print(f"[LLM_CLOSE] JSON parsing failed: {e}, using classical close strategy")
+            # print(f"[LLM_CLOSE] JSON parsing failed: {e}, using classical close strategy")
             return {
                 "gripper_command": {
                     "action_type": "close_grasp",
@@ -1298,14 +1298,14 @@ Your output will directly control gripper opening and retreat sequence for safe 
         result = self._postprocess_close(raw, context)
         
         # Debug output
-        print(f"[LLM_CLOSE] ===== LLM Close Planning Results =====")
-        print(f"[LLM_CLOSE] Action type: {result['gripper_command']['action_type']}")
-        print(f"[LLM_CLOSE] TCP adjustment: {result['tcp_adjustment']['enabled']}")
-        if result['tcp_adjustment']['enabled']:
-            print(f"[LLM_CLOSE] Position offset: {result['tcp_adjustment']['position_offset']}")
-        print(f"[LLM_CLOSE] Contact assist: {result['attachment_strategy']['use_contact_assist']}")
-        print(f"[LLM_CLOSE] Contact threshold: {result['attachment_strategy']['contact_threshold']:.1f}N")
-        print(f"[LLM_CLOSE] Source: {result.get('source', 'llm')}")
+        # print(f"[LLM_CLOSE] ===== LLM Close Planning Results =====")
+        # print(f"[LLM_CLOSE] Action type: {result['gripper_command']['action_type']}")
+        # print(f"[LLM_CLOSE] TCP adjustment: {result['tcp_adjustment']['enabled']}")
+        # if result['tcp_adjustment']['enabled']:
+        #     print(f"[LLM_CLOSE] Position offset: {result['tcp_adjustment']['position_offset']}")
+        # print(f"[LLM_CLOSE] Contact assist: {result['attachment_strategy']['use_contact_assist']}")
+        # print(f"[LLM_CLOSE] Contact threshold: {result['attachment_strategy']['contact_threshold']:.1f}N")
+        # print(f"[LLM_CLOSE] Source: {result.get('source', 'llm')}")
         
         return {
             **result,

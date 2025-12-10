@@ -71,7 +71,7 @@ gripper_geom:
   finger_depth: 0.060
   ground_margin: 0.003
   max_sym_open_rad: 1.2
-  open_clearance: 0.030
+  open_clearance: 0.045
   max_open: 0.18
 
 clearance:
@@ -161,7 +161,7 @@ verify:
   max_global_restarts: 5
 
 llm:
-  enabled: true
+  enabled: false
   mode: "multi_agent"  # mode: "multi_agent" or "single_agent" 
   client: "openai"
   model: "gpt-4o-mini"

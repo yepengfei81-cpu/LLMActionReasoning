@@ -13,7 +13,7 @@ try:
     ANGLE_OPT_AVAILABLE = True
 except ImportError:
     ANGLE_OPT_AVAILABLE = False
-    print("[ANGLE_OPT] Angle optimizer not available")
+    # print("[ANGLE_OPT] Angle optimizer not available")
 
 class MotionExecutor:
     def __init__(self, env, robot_model, gripper_helper, verifier):
@@ -57,14 +57,14 @@ class MotionExecutor:
         self.skip_angle_correction = bool(self.baseline_cfg.get("skip_angle_correction", False))
         self.direct_release_gap = float(self.baseline_cfg.get("direct_release_gap", 0.05))
         
-        if self.baseline_enabled:
-            print("="*60)
-            print("[BASELINE MODE] Enabled - Simplified placement strategy")
-            print(f"  - Skip collision detection: {self.skip_collision_detection}")
-            print(f"  - Skip force feedback: {self.skip_force_feedback}")
-            print(f"  - Skip angle correction: {self.skip_angle_correction}")
-            print(f"  - Direct release gap: {self.direct_release_gap:.3f}m")
-            print("="*60)
+        # if self.baseline_enabled:
+        #     print("="*60)
+        #     print("[BASELINE MODE] Enabled - Simplified placement strategy")
+        #     print(f"  - Skip collision detection: {self.skip_collision_detection}")
+        #     print(f"  - Skip force feedback: {self.skip_force_feedback}")
+        #     print(f"  - Skip angle correction: {self.skip_angle_correction}")
+        #     print(f"  - Direct release gap: {self.direct_release_gap:.3f}m")
+        #     print("="*60)
 
         # Initialize submodules
         self.viz = MotionVisualizer(env, robot_model, gripper_helper, verifier)
@@ -78,9 +78,7 @@ class MotionExecutor:
         if ANGLE_OPT_AVAILABLE and not (self.baseline_enabled and self.skip_angle_correction):
             import pybullet as p
             self.angle_optimizer = AngleOptimizer(robot_model, p)
-            print("[ANGLE_OPT] Angle optimizer initialized")
-        elif self.baseline_enabled and self.skip_angle_correction:
-            print("[ANGLE_OPT] Disabled in baseline mode")
+            # print("[ANGLE_OPT] Angle optimizer initialized")
 
     def _wait(self, sec):
         if sec <= 0: return
@@ -130,10 +128,10 @@ class MotionExecutor:
         current_bottom_normal, current_brick_rpy = self._get_brick_bottom_normal()
         current_roll, current_pitch, current_yaw = current_brick_rpy
         
-        print(f"[BRICK_ORIENTATION] Current brick RPY: Roll={np.degrees(current_roll):.2f}°, Pitch={np.degrees(current_pitch):.2f}°, Yaw={np.degrees(current_yaw):.2f}°")
-        print(f"[BRICK_ORIENTATION] Target brick RPY: Roll={np.degrees(target_roll):.2f}°, Pitch={np.degrees(target_pitch):.2f}°, Yaw={np.degrees(target_yaw):.2f}°")
-        print(f"[BRICK_ORIENTATION] Current bottom normal: {current_bottom_normal}")
-        print(f"[BRICK_ORIENTATION] Target ground normal: {ground_normal}")
+        # print(f"[BRICK_ORIENTATION] Current brick RPY: Roll={np.degrees(current_roll):.2f}°, Pitch={np.degrees(current_pitch):.2f}°, Yaw={np.degrees(current_yaw):.2f}°")
+        # print(f"[BRICK_ORIENTATION] Target brick RPY: Roll={np.degrees(target_roll):.2f}°, Pitch={np.degrees(target_pitch):.2f}°, Yaw={np.degrees(target_yaw):.2f}°")
+        # print(f"[BRICK_ORIENTATION] Current bottom normal: {current_bottom_normal}")
+        # print(f"[BRICK_ORIENTATION] Target ground normal: {ground_normal}")
         
         # Target: brick bottom normal vector should point to [0, 0, -1] 
         target_bottom_normal = np.array([0.0, 0.0, -1.0])
@@ -142,24 +140,24 @@ class MotionExecutor:
         alignment_dot = np.dot(current_bottom_normal, target_bottom_normal)
         alignment_angle = np.arccos(np.clip(alignment_dot, -1.0, 1.0))
         
-        print(f"[BRICK_ORIENTATION] Bottom alignment dot product: {alignment_dot:.6f}")
-        print(f"[BRICK_ORIENTATION] Alignment angle: {np.degrees(alignment_angle):.2f} degrees")
+        # print(f"[BRICK_ORIENTATION] Bottom alignment dot product: {alignment_dot:.6f}")
+        # print(f"[BRICK_ORIENTATION] Alignment angle: {np.degrees(alignment_angle):.2f} degrees")
         
         roll_error = current_roll - target_roll  
         pitch_error = current_pitch - target_pitch  
         yaw_error = current_yaw - target_yaw
         
-        print(f"[BRICK_ORIENTATION] Brick orientation errors:")
-        print(f"[BRICK_ORIENTATION]   Roll error: {np.degrees(roll_error):.2f}° (target: {np.degrees(target_roll):.2f}°)")
-        print(f"[BRICK_ORIENTATION]   Pitch error: {np.degrees(pitch_error):.2f}° (target: {np.degrees(target_pitch):.2f}°)")
-        print(f"[BRICK_ORIENTATION]   Yaw error: {np.degrees(yaw_error):.2f}° (target: {np.degrees(target_yaw):.2f}°)")
+        # print(f"[BRICK_ORIENTATION] Brick orientation errors:")
+        # print(f"[BRICK_ORIENTATION]   Roll error: {np.degrees(roll_error):.2f}° (target: {np.degrees(target_roll):.2f}°)")
+        # print(f"[BRICK_ORIENTATION]   Pitch error: {np.degrees(pitch_error):.2f}° (target: {np.degrees(target_pitch):.2f}°)")
+        # print(f"[BRICK_ORIENTATION]   Yaw error: {np.degrees(yaw_error):.2f}° (target: {np.degrees(target_yaw):.2f}°)")
         
         # Calculate target TCP pose
         current_tcp_pos, current_tcp_quat = self.rm.tcp_world_pose()
         current_tcp_rpy = p.getEulerFromQuaternion(current_tcp_quat)
         current_tcp_roll, current_tcp_pitch, current_tcp_yaw = current_tcp_rpy
         
-        print(f"[TCP_ORIENTATION] Current TCP RPY: Roll={np.degrees(current_tcp_roll):.2f}°, Pitch={np.degrees(current_tcp_pitch):.2f}°, Yaw={np.degrees(current_tcp_yaw):.2f}°")
+        # print(f"[TCP_ORIENTATION] Current TCP RPY: Roll={np.degrees(current_tcp_roll):.2f}°, Pitch={np.degrees(current_tcp_pitch):.2f}°, Yaw={np.degrees(current_tcp_yaw):.2f}°")
         
         if abs(target_roll) < 0.01 and abs(target_pitch) < 0.01:  # Target is horizontal placement
             # High-precision horizontal strategy: stronger correction for precise parallelism
@@ -177,7 +175,7 @@ class MotionExecutor:
             target_tcp_roll = np.clip(target_tcp_roll, current_tcp_roll - max_adjustment, current_tcp_roll + max_adjustment)
             target_tcp_pitch = np.clip(target_tcp_pitch, current_tcp_pitch - max_adjustment, current_tcp_pitch + max_adjustment)
             
-            print(f"[TCP_STRATEGY] Using high-precision horizontal strategy (50% adjustment, ±{np.degrees(max_adjustment):.1f}° limit)")
+            # print(f"[TCP_STRATEGY] Using high-precision horizontal strategy (50% adjustment, ±{np.degrees(max_adjustment):.1f}° limit)")
         else:
             # For non-horizontal targets, use similar high-precision strategy
             delta_roll = target_roll - current_roll
@@ -194,11 +192,11 @@ class MotionExecutor:
             target_tcp_roll = np.clip(target_tcp_roll, current_tcp_roll - max_adjustment, current_tcp_roll + max_adjustment)
             target_tcp_pitch = np.clip(target_tcp_pitch, current_tcp_pitch - max_adjustment, current_tcp_pitch + max_adjustment)
             
-            print(f"[TCP_STRATEGY] Using high-precision proportional strategy (40% adjustment, ±{np.degrees(max_adjustment):.1f}° limit)")
+            # print(f"[TCP_STRATEGY] Using high-precision proportional strategy (40% adjustment, ±{np.degrees(max_adjustment):.1f}° limit)")
         
         target_tcp_rpy = [target_tcp_roll, target_tcp_pitch, target_tcp_yaw]
         
-        print(f"[TCP_TARGET] Target TCP RPY: Roll={np.degrees(target_tcp_roll):.2f}°, Pitch={np.degrees(target_tcp_pitch):.2f}°, Yaw={np.degrees(target_tcp_yaw):.2f}°")
+        # print(f"[TCP_TARGET] Target TCP RPY: Roll={np.degrees(target_tcp_roll):.2f}°, Pitch={np.degrees(target_tcp_pitch):.2f}°, Yaw={np.degrees(target_tcp_yaw):.2f}°")
         
         # Convert to quaternion
         target_tcp_quat = p.getQuaternionFromEuler(target_tcp_rpy)
@@ -209,14 +207,14 @@ class MotionExecutor:
             np.degrees(target_tcp_pitch - current_tcp_pitch), 
             np.degrees(target_tcp_yaw - current_tcp_yaw)
         ]
-        print(f"[ROLL_DETECTION] TCP pose change: ΔRoll={tcp_rpy_change[0]:.1f}°, ΔPitch={tcp_rpy_change[1]:.1f}°, ΔYaw={tcp_rpy_change[2]:.1f}°")
+        # print(f"[ROLL_DETECTION] TCP pose change: ΔRoll={tcp_rpy_change[0]:.1f}°, ΔPitch={tcp_rpy_change[1]:.1f}°, ΔYaw={tcp_rpy_change[2]:.1f}°")
         
         # Detect large rotations (possible gimbal lock signs)
         tcp_warn_deg = float(self.ocfg.get("tcp_change_warning_deg", 45.0))
         large_rotation = any(abs(change) > tcp_warn_deg for change in tcp_rpy_change)
-        if large_rotation:
-            print(f"[ROLL_WARNING] Large TCP rotation detected! May cause gimbal lock")
-            print(f"[ROLL_WARNING] Change amount: {tcp_rpy_change}")
+        # if large_rotation:
+        #     print(f"[ROLL_WARNING] Large TCP rotation detected! May cause gimbal lock")
+        #     print(f"[ROLL_WARNING] Change amount: {tcp_rpy_change}")
         
         return current_tcp_pos, target_tcp_quat
 
@@ -235,7 +233,7 @@ class MotionExecutor:
                 - yaw_tolerance: Yaw tolerance (default 3.0 degrees)
             target_yaw: Compatibility parameter, used if brick_orientation_control is None
         """
-        print(f"[ORIENTATION_CONTROL] {description}")
+        # print(f"[ORIENTATION_CONTROL] {description}")
         
         # Parse parameters
         if brick_orientation_control is not None:
@@ -254,8 +252,8 @@ class MotionExecutor:
             pitch_tolerance = 1.0 
             yaw_tolerance = 2.0    
         
-        print(f"[ORIENTATION_CONTROL] Target RPY: Roll={target_roll:.2f}°, Pitch={target_pitch:.2f}°, Yaw={target_yaw:.4f}rad")
-        print(f"[ORIENTATION_CONTROL] Tolerances: Roll=±{roll_tolerance:.1f}°, Pitch=±{pitch_tolerance:.1f}°, Yaw=±{yaw_tolerance:.1f}°")
+        # print(f"[ORIENTATION_CONTROL] Target RPY: Roll={target_roll:.2f}°, Pitch={target_pitch:.2f}°, Yaw={target_yaw:.4f}rad")
+        # print(f"[ORIENTATION_CONTROL] Tolerances: Roll=±{roll_tolerance:.1f}°, Pitch=±{pitch_tolerance:.1f}°, Yaw=±{yaw_tolerance:.1f}°")
         
         # Calculate TCP pose ensuring brick bottom is parallel
         tcp_xyz, tcp_quat = self._calculate_tcp_pose_for_parallel_bottom(
@@ -270,10 +268,10 @@ class MotionExecutor:
         if hasattr(self, 'brick_id') and self.brick_id is not None:
             brick_pos_before, brick_quat_before = p.getBasePositionAndOrientation(self.brick_id)
             brick_rpy_before = p.getEulerFromQuaternion(brick_quat_before)
-            print(f"[ROLL_MONITOR] Brick RPY before execution: Roll={np.degrees(brick_rpy_before[0]):.1f}°, Pitch={np.degrees(brick_rpy_before[1]):.1f}°, Yaw={np.degrees(brick_rpy_before[2]):.1f}°")
+            # print(f"[ROLL_MONITOR] Brick RPY before execution: Roll={np.degrees(brick_rpy_before[0]):.1f}°, Pitch={np.degrees(brick_rpy_before[1]):.1f}°, Yaw={np.degrees(brick_rpy_before[2]):.1f}°")
         else:
             brick_rpy_before = None
-            print(f"[ROLL_MONITOR] No brick ID, skipping brick pose monitoring")
+            # print(f"[ROLL_MONITOR] No brick ID, skipping brick pose monitoring")
         
         # Execute movement
         self._move_tcp(dict(xyz=tcp_xyz, rpy=tcp_rpy))
@@ -298,8 +296,8 @@ class MotionExecutor:
                 elif brick_rpy_change[i] < -180:
                     brick_rpy_change[i] += 360
             
-            print(f"[ROLL_MONITOR] Brick RPY after execution: Roll={np.degrees(brick_rpy_after[0]):.1f}°, Pitch={np.degrees(brick_rpy_after[1]):.1f}°, Yaw={np.degrees(brick_rpy_after[2]):.1f}°")
-            print(f"[ROLL_MONITOR] Brick pose change: ΔRoll={brick_rpy_change[0]:.1f}°, ΔPitch={brick_rpy_change[1]:.1f}°, ΔYaw={brick_rpy_change[2]:.1f}°")
+            # print(f"[ROLL_MONITOR] Brick RPY after execution: Roll={np.degrees(brick_rpy_after[0]):.1f}°, Pitch={np.degrees(brick_rpy_after[1]):.1f}°, Yaw={np.degrees(brick_rpy_after[2]):.1f}°")
+            # print(f"[ROLL_MONITOR] Brick pose change: ΔRoll={brick_rpy_change[0]:.1f}°, ΔPitch={brick_rpy_change[1]:.1f}°, ΔYaw={brick_rpy_change[2]:.1f}°")
             
             # Detect gimbal lock: if brick has large rotation
             roll_check_deg = float(self.ocfg.get("roll_check_threshold_deg", 30.0))
@@ -318,9 +316,9 @@ class MotionExecutor:
         target_bottom_normal = np.array([0.0, 0.0, -1.0])
         final_alignment = np.dot(bottom_normal_after, target_bottom_normal)
         
-        print(f"[ORIENTATION_VERIFY] Final brick RPY: Roll={np.degrees(brick_roll_after):.2f}°, Pitch={np.degrees(brick_pitch_after):.2f}°, Yaw={np.degrees(brick_yaw_after):.2f}°")
-        print(f"[ORIENTATION_VERIFY] Final bottom normal: {bottom_normal_after}")
-        print(f"[ORIENTATION_VERIFY] Final bottom alignment: {final_alignment:.6f}")
+        # print(f"[ORIENTATION_VERIFY] Final brick RPY: Roll={np.degrees(brick_roll_after):.2f}°, Pitch={np.degrees(brick_pitch_after):.2f}°, Yaw={np.degrees(brick_yaw_after):.2f}°")
+        # print(f"[ORIENTATION_VERIFY] Final bottom normal: {bottom_normal_after}")
+        # print(f"[ORIENTATION_VERIFY] Final bottom alignment: {final_alignment:.6f}")
         
         # Verify using passed tolerance parameters
         roll_error = abs(brick_roll_after - target_roll)
@@ -336,25 +334,25 @@ class MotionExecutor:
         align_thresh = float(self.ocfg.get("alignment_threshold", 0.95))
         alignment_ok = final_alignment > align_thresh
         
-        print(f"[ORIENTATION_CHECK] Roll OK: {roll_ok} (error: {np.degrees(roll_error):.2f}°, tolerance: ±{roll_tolerance:.1f}°)")
-        print(f"[ORIENTATION_CHECK] Pitch OK: {pitch_ok} (error: {np.degrees(pitch_error):.2f}°, tolerance: ±{pitch_tolerance:.1f}°)")
-        print(f"[ORIENTATION_CHECK] Yaw OK: {yaw_ok} (error: {np.degrees(yaw_error):.2f}°, tolerance: ±{yaw_tolerance:.1f}°)")
-        print(f"[ORIENTATION_CHECK] Alignment OK: {alignment_ok} (value: {final_alignment:.6f})")
+        # print(f"[ORIENTATION_CHECK] Roll OK: {roll_ok} (error: {np.degrees(roll_error):.2f}°, tolerance: ±{roll_tolerance:.1f}°)")
+        # print(f"[ORIENTATION_CHECK] Pitch OK: {pitch_ok} (error: {np.degrees(pitch_error):.2f}°, tolerance: ±{pitch_tolerance:.1f}°)")
+        # print(f"[ORIENTATION_CHECK] Yaw OK: {yaw_ok} (error: {np.degrees(yaw_error):.2f}°, tolerance: ±{yaw_tolerance:.1f}°)")
+        # print(f"[ORIENTATION_CHECK] Alignment OK: {alignment_ok} (value: {final_alignment:.6f})")
         
         success = roll_ok and pitch_ok and yaw_ok and alignment_ok
         
-        if success:
-            print("[ORIENTATION_SUCCESS] Brick bottom is strictly parallel to ground with correct orientation")
-        else:
-            print(f"[ORIENTATION_WARNING] Brick orientation control incomplete!")
-            if not roll_ok:
-                print(f"[ORIENTATION_WARNING]   Roll error too large: {np.degrees(roll_error):.2f}° (tolerance: ±{roll_tolerance:.1f}°)")
-            if not pitch_ok:
-                print(f"[ORIENTATION_WARNING]   Pitch error too large: {np.degrees(pitch_error):.2f}° (tolerance: ±{pitch_tolerance:.1f}°)")
-            if not yaw_ok:
-                print(f"[ORIENTATION_WARNING]   Yaw error too large: {np.degrees(yaw_error):.2f}° (tolerance: ±{yaw_tolerance:.1f}°)")
-            if not alignment_ok:
-                print(f"[ORIENTATION_WARNING]   Bottom alignment insufficient: {final_alignment:.6f}")
+        # if success:
+        #     print("[ORIENTATION_SUCCESS] Brick bottom is strictly parallel to ground with correct orientation")
+        # else:
+        #     print(f"[ORIENTATION_WARNING] Brick orientation control incomplete!")
+        #     if not roll_ok:
+        #         print(f"[ORIENTATION_WARNING]   Roll error too large: {np.degrees(roll_error):.2f}° (tolerance: ±{roll_tolerance:.1f}°)")
+        #     if not pitch_ok:
+        #         print(f"[ORIENTATION_WARNING]   Pitch error too large: {np.degrees(pitch_error):.2f}° (tolerance: ±{pitch_tolerance:.1f}°)")
+        #     if not yaw_ok:
+        #         print(f"[ORIENTATION_WARNING]   Yaw error too large: {np.degrees(yaw_error):.2f}° (tolerance: ±{yaw_tolerance:.1f}°)")
+        #     if not alignment_ok:
+        #         print(f"[ORIENTATION_WARNING]   Bottom alignment insufficient: {final_alignment:.6f}")
         
         return success
 
@@ -400,10 +398,10 @@ class MotionExecutor:
             yb      = np.array([-sy, cy, 0.0])
             okEX, cosEX_m, cosEX_t, src = _ok_ex_alignment(yb, ex_meas, ex_tcp)
 
-            print(f"[ORI] yaw={yaw:+.3f} dr={dr:+.3f} dp={dp:+.3f}  "
-                  f"down(ori)={cosDownOri:.3f}|geo={cosDownGeo:.3f}  "
-                  f"cosEX(m)={cosEX_m if cosEX_m is not None else 'NA'} cosEX(t)={cosEX_t:.3f} src={src} "
-                  f"-> okDown={okDown} okEX={okEX}")
+            # print(f"[ORI] yaw={yaw:+.3f} dr={dr:+.3f} dp={dp:+.3f}  "
+            #       f"down(ori)={cosDownOri:.3f}|geo={cosDownGeo:.3f}  "
+            #       f"cosEX(m)={cosEX_m if cosEX_m is not None else 'NA'} cosEX(t)={cosEX_t:.3f} src={src} "
+            #       f"-> okDown={okDown} okEX={okEX}")
             return okDown and okEX
 
         quad0 = self.yaw_quadrant % 4
@@ -517,7 +515,7 @@ class MotionExecutor:
             llm_pose = None
             if hasattr(self, 'llm_agent') and self.llm_agent is not None:
                 try:
-                    print("[LLM] Starting LLM-based pre_grasp planning...")
+                    print(" Starting LLM-based pre_grasp planning...")
                     llm_result = self.llm_handler.plan_pre_grasp_pose(wps, aux)
                     llm_pose = llm_result["pose"]
                     print(f"[LLM] Using LLM planned pose: xyz=({llm_pose['xyz'][0]:.6f}, {llm_pose['xyz'][1]:.6f}, {llm_pose['xyz'][2]:.6f})")
@@ -533,9 +531,14 @@ class MotionExecutor:
                 # Use LLM planned position or classical geometric position
                 if llm_pose is not None:
                     target_x, target_y, target_z = llm_pose["xyz"]
+                    print(f"[PRE-GRASP IK_CHECK] LLM Target TCP:  ({target_x:.4f}, {target_y:.4f}, {target_z:.4f})")
                     self._force_z_down_at(target_x, target_y, target_z, byaw)
                 else:
                     self._force_z_down_at(bx, by, z_top + approach + tip, byaw)
+                    print(f"[PRE-GRASP DEBUG] Real brick position: ({bx:.6f}, {by:.6f}, {bz:.6f})")
+                    print(f"[PRE-GRASP IK_CHECK] Geometric Target TCP:  ({bx:.4f}, {by:.4f}, {z_top + approach + tip:.4f})")
+                actual_tcp_pos, _ = self.rm.tcp_world_pose()
+                print(f"[IK_CHECK] Actual TCP:  ({actual_tcp_pos[0]:.4f}, {actual_tcp_pos[1]:.4f}, {actual_tcp_pos[2]:.4f})")               
                 self.viz.draw_brick_width_at_center(bx, by, bz, byaw)
                 self.viz.snap("pre_grasp@align")
 
@@ -608,13 +611,13 @@ class MotionExecutor:
                     required_gap, tol=0.001, iters=18, settle_sec=0.15, verbose=True
                 )
                 self.viz.snap("descend@after-open")
-                if not ok_gap:
-                    print(f"[WARN] gap still < target (gap={gap:.3f} < {required_gap:.3f}); "
-                          f"theta={theta:.3f} rad, pair={meta.get('pair')}, signs={meta.get('signs')} "
-                          f"→ will try to descend carefully (may contact).")
+                # if not ok_gap:
+                #     print(f"[WARN] gap still < target (gap={gap:.3f} < {required_gap:.3f}); "
+                #           f"theta={theta:.3f} rad, pair={meta.get('pair')}, signs={meta.get('signs')} "
+                #           f"→ will try to descend carefully (may contact).")
 
-                print(f"[DESCEND_PLAN] W={W:.3f} need_gap={required_gap:.3f} got_gap={gap:.3f} "
-                      f"→ target_tcp=({target_tcp_x:.3f}, {target_tcp_y:.3f}, {target_tcp_z:.3f})")
+                # print(f"[DESCEND_PLAN] W={W:.3f} need_gap={required_gap:.3f} got_gap={gap:.3f} "
+                #       f"→ target_tcp=({target_tcp_x:.3f}, {target_tcp_y:.3f}, {target_tcp_z:.3f})")
 
                 ok = self._force_z_down_at(target_tcp_x, target_tcp_y, target_tcp_z, byaw)
                 self.viz.snap("descend@at-target")
@@ -672,7 +675,7 @@ class MotionExecutor:
                     offset = llm_close['tcp_adjustment']['position_offset']
                     tx, ty, tz = self.vf.tcp_pos()
                     self._force_z_down_at(tx + offset[0], ty + offset[1], tz + offset[2], byaw)
-                    print(f"[LLM_CLOSE] Applied TCP adjustment: {offset}")
+                    # print(f"[LLM_CLOSE] Applied TCP adjustment: {offset}")
                 
                 self.gripper.close()
                 self._wait(self.timing.get("gripper_close_wait_sec", 0.25))
@@ -681,7 +684,7 @@ class MotionExecutor:
                 if assist_cfg.get("enabled", False):
                     if llm_close and llm_close['attachment_strategy']['use_contact_assist']:
                         threshold = llm_close['attachment_strategy']['contact_threshold']
-                        print(f"[LLM_CLOSE] Using LLM contact threshold: {threshold:.1f}N")
+                        # print(f"[LLM_CLOSE] Using LLM contact threshold: {threshold:.1f}N")
                     self.gripper.try_attach_with_contact(brick_id, assist_cfg)
                 self.viz.snap("close@after-close")
 
@@ -732,13 +735,6 @@ class MotionExecutor:
                 
                 # Execute LLM planned lift
                 self._force_z_down_at(target_tcp_x, target_tcp_y, target_tcp_z, byaw)
-                
-                # Apply stability control
-                if stability_control.get('verify_attachment', True):
-                    print("[LLM_LIFT] Verifying attachment during lift...")
-                    if not self.gripper.is_attached():
-                        print("[LLM_LIFT] Warning: Attachment lost during lift")
-                
             else:
                 # Use classical lift strategy
                 self._force_z_down_at(bx, by, z_top + lift_clear + tip, byaw)
@@ -749,19 +745,19 @@ class MotionExecutor:
             if not self.vf.check_lift():
                 # Use LLM fallback strategy or classical fallback
                 if llm_lift is not None and llm_lift.get('fallback_strategy', {}).get('re_attach_on_failure', True):
-                    print("[LLM_LIFT] Using LLM fallback: re-attachment strategy")
+                    # print("[LLM_LIFT] Using LLM fallback: re-attachment strategy")
                     max_retries = llm_lift['fallback_strategy'].get('max_retries', 2)
                     
                     for retry in range(max_retries):
                         if assist_cfg.get("enabled", False) and (not self.gripper.is_attached()):
-                            print(f"[LLM_LIFT] Re-attachment attempt {retry + 1}/{max_retries}")
+                            # print(f"[LLM_LIFT] Re-attachment attempt {retry + 1}/{max_retries}")
                             self.gripper.try_attach_with_contact(brick_id, {"contact_gate": False})
                             self._force_z_down_at(target_tcp_x, target_tcp_y, target_tcp_z, byaw)
                             if self.vf.check_lift():
                                 break
                     
                     if not self.vf.check_lift():
-                        print("[LLM_LIFT] LLM fallback strategies exhausted")
+                        # print("[LLM_LIFT] LLM fallback strategies exhausted")
                         restarts_left -= 1
                         continue
                 else:
@@ -827,7 +823,7 @@ class MotionExecutor:
                         description="Pre-place with LLM brick orientation control"
                     )
                     if not success:
-                        print("[WARN] Brick orientation control failed, using traditional method")
+                        # print("[WARN] Brick orientation control failed, using traditional method")
                         self._force_z_down_at(target_tcp_x, target_tcp_y, target_tcp_z, target_rpy[2])
                 else:
                     self._force_z_down_at(target_tcp_x, target_tcp_y, target_tcp_z, target_rpy[2])
@@ -844,7 +840,7 @@ class MotionExecutor:
                     description="Classical pre-place with brick orientation control"
                 )
                 if not success:
-                    print("[WARN] Brick orientation control failed, using traditional force_z_down_at")
+                    # print("[WARN] Brick orientation control failed, using traditional force_z_down_at")
                     self._force_z_down_at(gx, gy, gz_top + approach + tip, yaw_place)
             
             self.viz.snap("pre_place@above")
@@ -914,17 +910,17 @@ class MotionExecutor:
 
             # Baseline mode
             if self.baseline_enabled and self.skip_collision_detection:
-                print("[BASELINE_PLACE] Using simplified placement - direct to target position (no collision detection)")
+                # print("[BASELINE_PLACE] Using simplified placement - direct to target position (no collision detection)")
                 
                 # Move directly to target position (brick bottom + tip offset)
                 target_z = gz_top + tip  # Direct to brick top position
                 target_yaw_for_place = yaw_place
                 
-                print(f"[BASELINE_PLACE] Moving directly to target: ({gx:.6f}, {gy:.6f}, {target_z:.6f})")
+                # print(f"[BASELINE_PLACE] Moving directly to target: ({gx:.6f}, {gy:.6f}, {target_z:.6f})")
                 self._force_z_down_at(gx, gy, target_z, target_yaw_for_place)
                 
                 self.viz.snap("place@direct_target")
-                print("[BASELINE_PLACE] Reached target position directly - no collision detection performed")
+                # print("[BASELINE_PLACE] Reached target position directly - no collision detection performed")
                 
 
                 touched_sid = support_ids_planned[0] if 'support_ids_planned' in locals() and support_ids_planned else support_ids[0]
@@ -976,7 +972,7 @@ class MotionExecutor:
                         description="Initial descend position with brick orientation control"
                     )
                     if not success:
-                        print("[WARN] Initial brick orientation control failed, using traditional method")
+                        # print("[WARN] Initial brick orientation control failed, using traditional method")
                         target_yaw_for_brick = brick_orientation.get('target_yaw', yaw_place)
                         self._force_z_down_at(gx, gy, start_bottom + tip, target_yaw_for_brick)
                 else:
@@ -998,7 +994,7 @@ class MotionExecutor:
                             description=f"Descend step {i+1}/{steps} with brick orientation control"
                         )
                         if not success:
-                            print(f"[WARN] Brick orientation control failed at step {i+1}, using traditional method")
+                            # print(f"[WARN] Brick orientation control failed at step {i+1}, using traditional method")
                             target_yaw_for_brick = brick_orientation.get('target_yaw', yaw_place)
                             self._force_z_down_at(gx, gy, z_next + tip, target_yaw_for_brick)
                     else:
@@ -1017,7 +1013,7 @@ class MotionExecutor:
                     print(f"[PLACE] touchdown on support body id={touched_sid}.")
                     self.viz.snap("place@touchdown")
                 else:
-                    print("[WARN] touchdown not detected within margin; proceed to release anyway.")
+                    # print("[WARN] touchdown not detected within margin; proceed to release anyway.")
                     self.viz.snap("place@pre-release")
 
             # release
@@ -1028,12 +1024,12 @@ class MotionExecutor:
 
             #Baseline mode
             if self.baseline_enabled and self.skip_force_feedback:
-                print("[BASELINE_RELEASE] Using simplified release - direct gripper opening (no force feedback)")
+                # print("[BASELINE_RELEASE] Using simplified release - direct gripper opening (no force feedback)")
                 
                 # Use fixed parameters for direct release
                 target_gap = W + self.open_clearance + self.direct_release_gap
                 
-                print(f"[BASELINE_RELEASE] Direct release: gap={target_gap:.3f}m")
+                # print(f"[BASELINE_RELEASE] Direct release: gap={target_gap:.3f}m")
                 
                 # Directly open gripper to target gap
                 ok_gap, theta, gap, meta = self.gripper.open_to_gap(
@@ -1047,7 +1043,7 @@ class MotionExecutor:
                     self.gripper.detach()
                     self._wait(0.02)
                 
-                print("[BASELINE_RELEASE] Simplified release completed")
+                # print("[BASELINE_RELEASE] Simplified release completed")
             else:
                 release_params = self.llm_handler.plan_release(
                     wps, aux, gx, gy, gz_top, W, self.release_above, touched_sid
@@ -1135,7 +1131,7 @@ class MotionExecutor:
 
                 # Final confirmation after release
                 if self.vf.finger_contacts_with(brick_id) > 0:
-                    print("[WARN] still contacting after release loop; final widen+up.")
+                    # print("[WARN] still contacting after release loop; final widen+up.")
                     self.gripper.open_to_gap(W + self.open_clearance + self.release_max_extra,
                                              tol=0.001, iters=12, settle_sec=0.10, verbose=False)
                     self._force_z_down_at(gx, gy, gz_top + self.release_above + tip + 0.015, yaw_place)
