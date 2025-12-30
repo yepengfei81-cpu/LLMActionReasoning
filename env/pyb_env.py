@@ -166,6 +166,20 @@ class BulletEnv:
         support_ids = [self.ground_id] + [self.brick_ids[i] for i in support_brick_indices]
         return support_ids
 
+    def get_related_support_ids_by_level(self, level: int) -> list:
+        if not hasattr(self, "layout_targets"):
+            self._parse_layout()
+        
+        support_ids = [self.ground_id]
+        
+        if level > 0:
+            for idx, target in enumerate(self.layout_targets):
+                if target["level"] == level - 1:
+                    if idx < len(self.brick_ids):
+                        support_ids.append(self.brick_ids[idx])
+        
+        return support_ids
+    
     def get_level_name(self, brick_index):
         """Get brick level name"""
         if not hasattr(self, "layout_targets"):

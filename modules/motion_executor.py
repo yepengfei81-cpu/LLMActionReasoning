@@ -16,7 +16,7 @@ except ImportError:
     # print("[ANGLE_OPT] Angle optimizer not available")
 
 class MotionExecutor:
-    def __init__(self, env, robot_model, gripper_helper, verifier):
+    def __init__(self, env, robot_model, gripper_helper, verifier, sam3_segmenter=None, eye_in_hand_camera=None):
         self.env = env
         self.rm = robot_model
         self.gripper = gripper_helper
@@ -56,15 +56,6 @@ class MotionExecutor:
         self.skip_force_feedback = bool(self.baseline_cfg.get("skip_force_feedback", False))
         self.skip_angle_correction = bool(self.baseline_cfg.get("skip_angle_correction", False))
         self.direct_release_gap = float(self.baseline_cfg.get("direct_release_gap", 0.05))
-        
-        # if self.baseline_enabled:
-        #     print("="*60)
-        #     print("[BASELINE MODE] Enabled - Simplified placement strategy")
-        #     print(f"  - Skip collision detection: {self.skip_collision_detection}")
-        #     print(f"  - Skip force feedback: {self.skip_force_feedback}")
-        #     print(f"  - Skip angle correction: {self.skip_angle_correction}")
-        #     print(f"  - Direct release gap: {self.direct_release_gap:.3f}m")
-        #     print("="*60)
 
         # Initialize submodules
         self.viz = MotionVisualizer(env, robot_model, gripper_helper, verifier)
@@ -72,7 +63,13 @@ class MotionExecutor:
         
         # Compatibility attribute for external access
         self.llm_agent = self.llm_handler.llm_agent
-        
+
+        # SAM3 segmenter
+        self.sam3_segmenter = sam3_segmenter
+
+        # Eye-in-hand camera
+        self.eye_in_hand_camera = eye_in_hand_camera
+
         # Angle optimization system
         self.angle_optimizer = None
         if ANGLE_OPT_AVAILABLE and not (self.baseline_enabled and self.skip_angle_correction):
@@ -89,8 +86,61 @@ class MotionExecutor:
         self._wait(self.settle_sec)
         self.viz.draw_tcp_axes()
 
+    def refine_brick_position_with_eye_in_hand(self, brick_id: int) -> Optional[Dict]:
+        if self.eye_in_hand_camera is None or self.sam3_segmenter is None:
+            return None
+        
+        print(f"\n{'='*70}")
+        print(f"[EYE-IN-HAND REFINEMENT] Brick {brick_id} Fine Localization")
+        print(f"{'='*70}")
+        
+        tcp_pos, tcp_orn = self.rm.tcp_world_pose()
+        
+        intrinsics = self.eye_in_hand_camera.get_intrinsics()
+        extrinsics = self.eye_in_hand_camera.get_extrinsics()
+        cam_pos, cam_orn = self.eye_in_hand_camera.get_camera_pose()
+        
+        # Use SAM3 to detect bricks from eye-in-hand camera
+        results = self.sam3_segmenter.segment_and_localize(
+            camera=self.eye_in_hand_camera,
+            verbose=False  # Disable internal printing, we print ourselves
+        )
+        
+        if not results:
+            print("[EYE-IN-HAND] No bricks detected!")
+            return None
+        
+        # Get PyBullet ground truth position
+        try:
+            gt_pos, gt_orn = p.getBasePositionAndOrientation(brick_id)
+            gt_pos = np.array(gt_pos)
+        except:
+            gt_pos = None
+        
+        best_result = results[0]
+        detected_pos = best_result['position']
 
-
+        print(f"\n[Position Comparison]")
+        print(f"   {'Source':<25} {'X':>10} {'Y':>10} {'Z':>10}")
+        print(f"   {'-'*55}")
+        print(f"   {'Eye-in-Hand (SAM3)':<25} {detected_pos[0]:>10.4f} {detected_pos[1]:>10.4f} {detected_pos[2]:>10.4f}")
+        
+        if gt_pos is not None:
+            print(f"   {'Ground Truth (PyBullet)':<25} {gt_pos[0]:>10.4f} {gt_pos[1]:>10.4f} {gt_pos[2]:>10.4f}")
+        
+        print(f"{'='*70}\n")
+        
+        return {
+            'detected_position': detected_pos,
+            'ground_truth_position': gt_pos,
+            'camera_position': cam_pos,
+            'tcp_position': np.array(tcp_pos),
+            'intrinsics': intrinsics,
+            'extrinsics': extrinsics,
+            'pixel_center': best_result.get('pixel_center', None),
+            'depth': best_result.get('depth', None)
+        }
+    
     def _brick_xy_yaw(self):
         pos, rpy = self.vf.brick_state()
         return pos[0], pos[1], pos[2], rpy[2]
@@ -480,6 +530,9 @@ class MotionExecutor:
         self._wait(self.timing.get("gripper_open_wait_sec", 0.15))
         self.gripper.open()
         self.viz.snap("reset@ready")
+        # Trigger SAM3 segmentation if available
+        if self.sam3_segmenter is not None:
+            self.sam3_segmenter.trigger_segment()
 
 
 
@@ -508,6 +561,9 @@ class MotionExecutor:
         gz_top = aux["min_pre_place"] - approach      # Target top surface height
         yaw_place = wps[4]["pose"]["rpy"][2]
         W = float(aux["W"])
+        brick_grasped = False  # Brick is grasped
+        brick_released = False  # Brick is released
+        failed_phase = None        
         
         restarts_left = self.max_restarts
         while restarts_left >= 0:
@@ -576,7 +632,12 @@ class MotionExecutor:
 
             if not self.vf.check_pre_grasp(z_top, tip, approach, brick_xy=(bx,by), brick_yaw=byaw):
                 restarts_left -= 1
+                failed_phase = "pre_grasp"
                 continue
+
+            # Enhanced eye-in-hand refinement
+            if self.eye_in_hand_camera is not None and self.sam3_segmenter is not None:
+                _ = self.refine_brick_position_with_eye_in_hand(brick_id)
 
             # descend
             llm_descend = None
@@ -638,17 +699,19 @@ class MotionExecutor:
                     self.viz.banner("[phase] descend -> back to pre_grasp]")
                     self._force_z_down_at(bx, by, (bz + aux["H"]/2) + approach + tip + 0.02, byaw)
                 else:
-                    return False
+                    return {"success": False, "holding_brick": False, "failed_phase": "descend", "brick_released": False}
 
-            if restarts_left < 0: return False
+            if restarts_left < 0: 
+                return {"success": False, "holding_brick": False, "failed_phase": "descend", "brick_released": False}
             
-            # Calculate final desired_bottom for verification
+            # Calculate final desired_bottom for verification (MUST be before the check)
             final_desired_bottom = target_tcp_z - tip if llm_descend is not None else max(
                 ground_z + float(self.gcfg.get("ground_margin", 0.003)),
                 bz - finger_depth/2
             )
             
             if not self.vf.check_descend_grasp(final_desired_bottom, tip, ground_id, brick_xy=(bx,by), brick_yaw=byaw):
+                failed_phase = "descend"
                 continue
 
             # close
@@ -705,8 +768,10 @@ class MotionExecutor:
                 else:
                     restarts_left -= 1
                     break
-            if restarts_left < 0: return False
+            if restarts_left < 0:
+                return {"success": False, "holding_brick": False, "failed_phase": "close", "brick_released": False}
             if not self.vf.check_close(assist_cfg):
+                failed_phase = "close"
                 continue
 
             # lift
@@ -759,6 +824,7 @@ class MotionExecutor:
                     if not self.vf.check_lift():
                         # print("[LLM_LIFT] LLM fallback strategies exhausted")
                         restarts_left -= 1
+                        failed_phase = "lift"
                         continue
                 else:
                     if assist_cfg.get("enabled", False) and (not self.gripper.is_attached()):
@@ -766,10 +832,13 @@ class MotionExecutor:
                         self._force_z_down_at(bx, by, z_top + lift_clear + tip, byaw)
                         if not self.vf.check_lift():
                             restarts_left -= 1
+                            failed_phase = "lift"
                             continue
                     else:
                         restarts_left -= 1
                         continue
+            brick_grasped = True
+            print(f"[FSM] Brick {brick_id} successfully grasped!")
 
             # pre_place
             llm_place_result = None
@@ -1021,6 +1090,8 @@ class MotionExecutor:
             if assist_cfg.get("enabled", False) and self.gripper.is_attached():
                 self.gripper.detach()
                 self._wait(self.timing.get("reattach_wait_sec", 0.05))
+            brick_released = True
+            print(f"[FSM] Brick {brick_id} released!")
 
             #Baseline mode
             if self.baseline_enabled and self.skip_force_feedback:
@@ -1142,7 +1213,18 @@ class MotionExecutor:
             self._force_z_down_at(gx, gy, gz_top + approach + tip, yaw_place)
             self.viz.snap("retreat@done")
             
-            return True
+            return {
+                "success": True, 
+                "holding_brick": False,
+                "failed_phase": None, 
+                "brick_released": True
+            }
+
 
         # If all retries failed
-        return False
+        return {
+            "success": False, 
+            "holding_brick": brick_grasped and not brick_released,
+            "failed_phase": failed_phase or "unknown", 
+            "brick_released": brick_released
+        }

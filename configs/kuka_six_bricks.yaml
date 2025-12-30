@@ -41,26 +41,42 @@ brick:
 
 
 
-
 # Goal layout definition for six bricks - 3-layer 2-column wall structure
 goal_layout:
   level_0:
     positions:
       - [0.30, 0.40]  # 1st column
-      - [0.52, 0.40]  # 2nd column (X spacing 0.20m = brick length, no overlap)
+      - [0.58, 0.40]  # 2nd column (X spacing 0.20m = brick length, no overlap)
   
   # Level 1: 2 bricks - Stacked on top of Level 0
   level_1:
     positions:
       - [0.30, 0.40]  # 1st column (Directly above Level 0 1st column)
-      - [0.52, 0.40]  # 2nd column (Directly above Level 0 2nd column)
+      - [0.58, 0.40]  # 2nd column (Directly above Level 0 2nd column)
 
   # Level 2: 2 bricks - Stacked on top of Level 1
   level_2:
     positions:
       - [0.30, 0.40]  # 1st column (Directly above Level 1 1st column)
-      - [0.52, 0.40]  # 2nd column (Directly above Level 1 2nd column)
+      - [0.58, 0.40]  # 2nd column (Directly above Level 1 2nd column)
+# goal_layout:
+#   # Level 0: 3块砖并排 (X间距 = 砖长 0.20m + 小间隙 0.02m = 0.22m)
+#   level_0:
+#     positions:
+#       - [0.19, 0.40]  # 左
+#       - [0.41, 0.40]  # 中
+#       - [0.63, 0.40]  # 右
+  
+#   # Level 1: 2块砖，放在底层交界处 (偏移半个砖长)
+#   level_1:
+#     positions:
+#       - [0.30, 0.40]  # 左中交界上方
+#       - [0.52, 0.40]  # 中右交界上方
 
+#   # Level 2: 1块砖，放在中层交界处
+#   level_2:
+#     positions:
+#       - [0.41, 0.40]  # 顶部中心
 
 goal:
   offset_xy: [0.70, 0.20]  # Default offset (backup)
@@ -166,4 +182,4 @@ llm:
   client: "openai"
   model: "gpt-4o-mini"
   temperature: 0.0  
-  api_key: "none"
+  api_key: "NONE"

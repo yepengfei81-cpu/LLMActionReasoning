@@ -1,7 +1,7 @@
 """
 QP 任务调度器 (带依赖约束)
 功能: 检测已放置砖块的偏移，动态调整任务序列
-关键: 输出调整后的任务队列，而非直接执行修复
+关键: 使用 MILP 优化求解最优任务序列
 """
 
 import numpy as np
@@ -15,6 +15,7 @@ try:
     HAS_CVXPY = True
 except ImportError:
     HAS_CVXPY = False
+    raise ImportError("cvxpy is required for QP optimization. Install with: pip install cvxpy")
 
 
 class TaskType(Enum):
@@ -24,191 +25,169 @@ class TaskType(Enum):
     TEMP_PLACE = "temp_place"          # 临时放置（移开碍事的砖块）
 
 
+class ActionType(Enum):
+    """原子动作类型"""
+    PRE_GRASP = "pre_grasp"
+    DESCEND = "descend"
+    CLOSE = "close"
+    LIFT = "lift"
+    PRE_PLACE = "pre_place"
+    DESCEND_PLACE = "descend_place"
+    RELEASE = "release"
+
+
+# 每个动作的估计时间成本（秒）
+ACTION_COSTS = {
+    ActionType.PRE_GRASP: 1.5,
+    ActionType.DESCEND: 1.0,
+    ActionType.CLOSE: 0.5,
+    ActionType.LIFT: 1.0,
+    ActionType.PRE_PLACE: 1.5,
+    ActionType.DESCEND_PLACE: 1.0,
+    ActionType.RELEASE: 0.5,
+}
+
+# 成本常量
+PLACE_ONLY_COST = (ACTION_COSTS[ActionType.PRE_PLACE] + 
+                   ACTION_COSTS[ActionType.DESCEND_PLACE] + 
+                   ACTION_COSTS[ActionType.RELEASE])  # ~3秒
+
+FULL_PICK_PLACE_COST = sum(ACTION_COSTS.values())  # ~7秒
+
+
 @dataclass
 class TaskItem:
     """任务项"""
     task_type: TaskType
-    brick_idx: int              # 砖块索引
-    brick_id: int               # 砖块 PyBullet ID
-    target_pos: Tuple[float, float, float]  # 目标位置 (x, y, z)
-    target_orn: Tuple[float, float, float]  # 目标姿态 (roll, pitch, yaw)
-    level: int                  # 层级
-    priority: int = 0           # 优先级 (数字越小优先级越高)
-    reason: str = ""            # 任务原因说明
-    is_temp: bool = False       # 是否为临时位置
+    brick_idx: int
+    brick_id: int
+    target_pos: Tuple[float, float, float]
+    target_orn: Tuple[float, float, float]
+    level: int
+    priority: int = 0
+    reason: str = ""
+    is_temp: bool = False
+    estimated_cost: float = 0.0
     
     def to_goal_pose(self) -> Tuple[float, float, float, float, float, float]:
-        """转换为 goal_pose 格式"""
         return (*self.target_pos, *self.target_orn)
 
 
 class QPTaskScheduler:
-    """基于 QP 的动态任务调度器 (输出任务序列)"""
+    """基于 MILP 的动态任务调度器"""
     
     def __init__(self, env, threshold_low=0.015, threshold_critical=0.03):
+        if not HAS_CVXPY:
+            raise ImportError("cvxpy is required. Install with: pip install cvxpy")
+        
         self.env = env
         self.threshold_low = threshold_low
         self.threshold_critical = threshold_critical
         
-        self.w_deviation = 1.0
-        self.w_dependency = 5.0
-        self.w_interrupt = 0.5
-        
         self.dependency_map = self._build_dependency_map()
-        self.task_queue: List[TaskItem] = []
         self.placed_bricks_info: List[Dict] = []
         self.temp_positions = self._generate_temp_positions()
         self.used_temp_positions: Set[int] = set()
         self.bricks_in_temp: Dict[int, Tuple[float, float, float]] = {}
         
     def _build_dependency_map(self) -> Dict[int, List[int]]:
+        """构建依赖关系图"""
         if hasattr(self.env, 'get_brick_dependencies'):
             dep_map = self.env.get_brick_dependencies()
             
             print(f"\n[QP] ═══════════════════════════════════════════════════")
-            print(f"[QP] Brick Dependency Map (from env.get_brick_dependencies()):")
+            print(f"[QP] Brick Dependency Map:")
             for brick_idx in sorted(dep_map.keys()):
                 deps = dep_map[brick_idx]
                 if deps:
                     print(f"     Brick {brick_idx} depends on: {deps}")
                 else:
                     print(f"     Brick {brick_idx} depends on: [] (base layer)")
-            
-            print(f"\n[QP] Reverse Dependencies (who depends on whom):")
-            for brick_idx in sorted(dep_map.keys()):
-                dependents = [idx for idx, deps in dep_map.items() if brick_idx in deps]
-                if dependents:
-                    print(f"     Brick {brick_idx} is needed by: {dependents}")
             print(f"[QP] ═══════════════════════════════════════════════════\n")
             
             return dep_map
         
-        print("[QP] WARNING: Using default dependency map!")
-        return {
-            0: [], 1: [],
-            2: [0, 1],
-            3: [2], 4: [2],
-            5: [3, 4],
-        }
+        raise ValueError("[QP] Environment must provide get_brick_dependencies()")
     
     def _generate_temp_positions(self) -> List[Tuple[float, float, float]]:
-        """生成临时放置位置列表（保留作为后备）"""
+        """生成临时放置位置列表"""
         ground_z = 0.0
         if hasattr(self.env, 'get_ground_top'):
             ground_z = self.env.get_ground_top()
         
         L, W, H = 0.20, 0.10, 0.035
         if hasattr(self.env, 'cfg') and 'brick' in self.env.cfg:
-            L, W, H = self.env.cfg['brick']['size_LWH']    
+            L, W, H = self.env.cfg['brick']['size_LWH']
+        
         self.brick_L = L
         self.brick_W = W
         self.brick_H = H
         self.ground_z = ground_z
         self.temp_z = ground_z + H / 2
+        self.temp_offset_distance = L + 0.1
         
-        # 临时位置偏移量（绝对值）
-        self.temp_offset_distance = L + 0.2  # 偏移距离
-        
-        # 计算堆叠区域中心，用于决定偏移方向
         if not hasattr(self.env, 'layout_targets'):
             self.env._parse_layout()
         
         layout_targets = self.env.layout_targets
         
         if not layout_targets:
-            print("[QP] Warning: No layout_targets found, using default temp positions")
             self.stack_center_x = 0.0
-            return [
-                (-0.3, 0.4, self.temp_z),
-                (-0.3, 0.5, self.temp_z),
-                (-0.3, 0.6, self.temp_z),
-            ]
+            self.stack_center_y = 0.0
+            return []
         
         xs = [t['xy'][0] for t in layout_targets]
         ys = [t['xy'][1] for t in layout_targets]
         
-        min_x, max_x = min(xs), max(xs)
-        min_y, max_y = min(ys), max(ys)
+        self.stack_center_x = (min(xs) + max(xs)) / 2
+        self.stack_center_y = (min(ys) + max(ys)) / 2
         
-        # 保存堆叠区域中心
-        self.stack_center_x = (min_x + max_x) / 2
-        self.stack_center_y = (min_y + max_y) / 2
-        
-        print(f"[QP] Temp position config:")
-        print(f"     Offset distance: {self.temp_offset_distance:.3f}m")
-        print(f"     Stack center: ({self.stack_center_x:.3f}, {self.stack_center_y:.3f})")
-        print(f"     Stack region: X=[{min_x:.3f}, {max_x:.3f}], Y=[{min_y:.3f}, {max_y:.3f}]")
-        
-        # 生成后备位置（在堆叠区域两侧）
         fallback_positions = []
         for i in range(len(layout_targets)):
-            # 交替放在左右两侧
             if i % 2 == 0:
-                tx = min_x - self.temp_offset_distance - (i // 2) * (L + 0.05)
+                tx = min(xs) - self.temp_offset_distance - (i // 2) * (L + 0.05)
             else:
-                tx = max_x + self.temp_offset_distance + (i // 2) * (L + 0.05)
-            ty = (min_y + max_y) / 2
+                tx = max(xs) + self.temp_offset_distance + (i // 2) * (L + 0.05)
+            ty = self.stack_center_y
             fallback_positions.append((tx, ty, self.temp_z))
         
         return fallback_positions
-        
+    
+    # ================== 状态查询方法 ==================
+    
     def get_temp_position_for_brick(self, brick_idx: int) -> Tuple[float, float, float]:
-        """
-        根据砖块的期望位置计算临时位置
-        临时位置 = 期望位置 + offset（向远离堆叠中心的方向偏移）
-        """
-        # 获取砖块的期望位置
+        """根据砖块期望位置计算临时位置（远离堆叠中心）"""
         if hasattr(self.env, 'layout_targets') and brick_idx < len(self.env.layout_targets):
             target = self.env.layout_targets[brick_idx]
             expected_x, expected_y = target['xy']
             
-            # 根据期望位置相对于堆叠中心的位置，决定偏移方向
-            # 如果期望位置在中心右边（x > center），向右偏移（+offset）
-            # 如果期望位置在中心左边（x < center），向左偏移（-offset）
+            # 向远离中心的方向偏移
             if expected_x >= self.stack_center_x:
                 temp_x = expected_x + self.temp_offset_distance
-                direction = "right (+X)"
             else:
                 temp_x = expected_x - self.temp_offset_distance
-                direction = "left (-X)"
             
-            temp_y = expected_y  # Y 方向保持不变
+            temp_y = expected_y
             temp_z = self.temp_z
             
-            # 检查是否与其他临时位置冲突
-            conflict_resolved = False
+            # 冲突检测
             for other_idx, other_pos in self.bricks_in_temp.items():
                 if other_idx != brick_idx:
                     dist = np.sqrt((temp_x - other_pos[0])**2 + (temp_y - other_pos[1])**2)
-                    if dist < self.brick_L * 0.8:  # 太近，需要额外偏移
-                        # 继续向同一方向偏移
+                    if dist < self.brick_L * 0.8:
                         if expected_x >= self.stack_center_x:
                             temp_x += self.brick_L + 0.05
                         else:
                             temp_x -= self.brick_L + 0.05
-                        conflict_resolved = True
-                        print(f"[QP] Temp position conflict with brick {other_idx}, adding extra offset")
-            
-            print(f"[QP] Temp position for brick {brick_idx}:")
-            print(f"     Expected pos: ({expected_x:.4f}, {expected_y:.4f})")
-            print(f"     Stack center X: {self.stack_center_x:.4f}")
-            print(f"     Offset direction: {direction}")
-            print(f"     Temp pos: ({temp_x:.4f}, {temp_y:.4f}, {temp_z:.4f})")
             
             return (temp_x, temp_y, temp_z)
         
-        # 如果无法获取期望位置，使用后备位置
-        print(f"[QP] WARNING: Cannot get expected position for brick {brick_idx}, using fallback")
-        return self.get_temp_position()
-    
-    def get_temp_position(self) -> Tuple[float, float, float]:
-        """获取一个可用的后备临时位置"""
+        # 使用后备位置
         for i, pos in enumerate(self.temp_positions):
             if i not in self.used_temp_positions:
                 self.used_temp_positions.add(i)
                 return pos
         
-        # 所有后备位置都用完了，生成新的
         offset = len(self.used_temp_positions) * 0.15
         return (-0.4 - offset, 0.0, self.temp_z)
     
@@ -220,7 +199,7 @@ class QPTaskScheduler:
     
     def mark_brick_in_temp(self, brick_idx: int, temp_pos: Tuple[float, float, float]):
         self.bricks_in_temp[brick_idx] = temp_pos
-        print(f"[QP] Marked brick {brick_idx} in temp position: {temp_pos}")
+        print(f"[QP] Marked brick {brick_idx} in temp position")
     
     def unmark_brick_from_temp(self, brick_idx: int):
         if brick_idx in self.bricks_in_temp:
@@ -235,7 +214,7 @@ class QPTaskScheduler:
         return self.dependency_map.get(brick_idx, [])
     
     def get_all_ancestors(self, brick_idx: int) -> Set[int]:
-        """递归获取某砖块的所有祖先依赖（包括间接依赖）"""
+        """递归获取所有祖先依赖"""
         ancestors = set()
         direct_deps = self.get_dependencies_for_brick(brick_idx)
         for dep in direct_deps:
@@ -244,7 +223,7 @@ class QPTaskScheduler:
         return ancestors
     
     def get_all_dependents(self, brick_idx: int) -> Set[int]:
-        """获取依赖于某砖块的所有砖块（递归获取所有后代）"""
+        """获取所有后代依赖（压在这个砖块上面的）"""
         dependents = set()
         for idx, deps in self.dependency_map.items():
             if brick_idx in deps:
@@ -255,16 +234,15 @@ class QPTaskScheduler:
     def check_brick_deviation(self, brick_id: int, expected_pos: np.ndarray) -> float:
         current_pos, _ = p.getBasePositionAndOrientation(brick_id)
         current_pos = np.array(current_pos)
-        deviation = np.linalg.norm(current_pos[:2] - expected_pos[:2])
-        return deviation
+        return np.linalg.norm(current_pos[:2] - expected_pos[:2])
     
     def check_all_placed_bricks(self) -> List[Dict]:
+        """检查所有已放置砖块的偏差"""
         deviations = []
         for brick_info in self.placed_bricks_info:
             brick_id = brick_info["brick_id"]
             expected_pos = np.array(brick_info["expected_pos"])
             deviation = self.check_brick_deviation(brick_id, expected_pos)
-            
             brick_idx = brick_info.get("brick_idx")
             is_in_temp = self.is_brick_in_temp(brick_idx)
             
@@ -288,163 +266,440 @@ class QPTaskScheduler:
         deviations = self.check_all_placed_bricks()
         return [d for d in deviations if d["needs_repair"]]
     
-    def _get_bricks_blocking_repair(self, brick_to_repair_idx: int, 
-                                    all_placed_deviations: List[Dict]) -> List[Dict]:
-        """获取阻挡修复的砖块列表（在上面的砖块）"""
-        dependents = self.get_all_dependents(brick_to_repair_idx)
-        
-        blocking_bricks = []
-        for d in all_placed_deviations:
-            if d["brick_idx"] in dependents and not d["is_in_temp"]:
-                blocking_bricks.append(d)
-        
-        # 按层级从高到低排序（先移走顶层）
-        blocking_bricks.sort(key=lambda x: -x["level"])
-        
-        return blocking_bricks
+    def _get_brick_level(self, brick_idx: int) -> int:
+        if hasattr(self.env, 'layout_targets') and brick_idx < len(self.env.layout_targets):
+            return self.env.layout_targets[brick_idx]["level"]
+        return 0
     
-    def _get_all_repairs_needed_for(self, target_brick_idx: int, 
-                                     bricks_to_repair: List[Dict]) -> List[Dict]:
-        """
-        获取为了放置 target_brick_idx，需要修复的所有砖块
-        包括：直接依赖需要修复的 + 间接依赖需要修复的
-        按依赖顺序排序（底层先修复）
-        """
-        all_ancestors = self.get_all_ancestors(target_brick_idx)
-        
-        # 找出所有需要修复的祖先
-        repairs_needed = []
-        for d in bricks_to_repair:
-            if d["brick_idx"] in all_ancestors:
-                repairs_needed.append(d)
-        
-        # 按层级排序（底层先修复）
-        repairs_needed.sort(key=lambda x: x["level"])
-        
-        return repairs_needed
+    def should_replan(self) -> bool:
+        return len(self.get_bricks_needing_repair()) > 0
     
-    def _get_bricks_in_temp_needed_for(self, brick_idx: int) -> List[int]:
-        """获取放置 brick_idx 之前需要先恢复的临时位置砖块"""
-        needed = []
-        all_ancestors = self.get_all_ancestors(brick_idx)
-        
-        for temp_brick_idx in self.bricks_in_temp:
-            if temp_brick_idx in all_ancestors:
-                needed.append(temp_brick_idx)
-        
-        needed.sort(key=lambda x: self._get_brick_level(x))
-        return needed
-    
-    def _plan_repair_sequence(self, brick_to_repair: Dict, 
-                               all_deviations: List[Dict],
-                               bricks_to_repair: List[Dict],
-                               scheduled_indices: Set[int]) -> List[TaskItem]:
+    def _solve_with_milp(self, 
+                         current_brick_idx: Optional[int],
+                         remaining_sequence: List[int],
+                         bricks_needing_repair: List[Dict],
+                         is_holding_brick: bool) -> List[TaskItem]:
         """
-        规划修复单个砖块的完整任务序列
-        包括：移走上面的砖块 -> 修复依赖 -> 修复目标 -> 放回上面的砖块
+        使用 MILP 求解最优任务序列
         """
-        tasks = []
-        brick_idx = brick_to_repair["brick_idx"]
         
-        print(f"[QP] Planning repair for brick {brick_idx}...")
+        print("\n[QP-MILP] ═══════════════════════════════════════════════")
+        print("[QP-MILP] Building MILP problem...")
         
-        # Step 1: 找出阻挡的砖块（在这个砖块上面的）
-        blocking = self._get_bricks_blocking_repair(brick_idx, all_deviations)
-        print(f"[QP]   Blocking bricks (on top): {[b['brick_idx'] for b in blocking]}")
+        # ========== Step 1: 分析当前状态 ==========
+        deviations = self.check_all_placed_bricks()
+        deviation_map = {d["brick_idx"]: d for d in deviations}
+        repair_set = {d["brick_idx"] for d in bricks_needing_repair}
         
-        # Step 2: 找出这个砖块的依赖中需要修复的
-        deps_needing_repair = []
-        ancestors = self.get_all_ancestors(brick_idx)
-        for d in bricks_to_repair:
-            if d["brick_idx"] in ancestors and d["brick_idx"] != brick_idx:
-                deps_needing_repair.append(d)
-        deps_needing_repair.sort(key=lambda x: x["level"])
-        print(f"[QP]   Dependencies needing repair: {[d['brick_idx'] for d in deps_needing_repair]}")
+        # 已正确放置的砖块
+        placed_correctly = set()
+        for d in deviations:
+            if not d["needs_repair"] and not d["is_in_temp"]:
+                placed_correctly.add(d["brick_idx"])
         
-        # Step 3: 移走阻挡的砖块（使用基于期望位置的临时位置）
-        for blocker in blocking:
-            if blocker["brick_idx"] not in scheduled_indices:
-                # 根据砖块的期望位置计算临时位置
-                temp_pos = self.get_temp_position_for_brick(blocker["brick_idx"])
-                tasks.append(TaskItem(
+        print(f"[QP-MILP] Placed correctly: {placed_correctly}")
+        print(f"[QP-MILP] Needs repair: {repair_set}")
+        print(f"[QP-MILP] In temp: {set(self.bricks_in_temp.keys())}")
+        print(f"[QP-MILP] Remaining to place: {remaining_sequence}")
+        print(f"[QP-MILP] Currently holding: {current_brick_idx if is_holding_brick else 'None'}")
+        
+        # ========== Step 2: 确定需要处理的任务 ==========
+        tasks_to_schedule = []  # [(brick_idx, task_type, must_use_temp)]
+        scheduled_set = set()  # 用于避免重复: (brick_idx, task_type)
+        
+        # 如果正在抓着砖块
+        held_brick = current_brick_idx if is_holding_brick else None
+        
+        # 检查抓着的砖块的依赖是否满足
+        held_deps_ok = True
+        if held_brick is not None:
+            ancestors = self.get_all_ancestors(held_brick)
+            ancestors_needing_repair = ancestors & repair_set
+            ancestors_in_temp = ancestors & set(self.bricks_in_temp.keys())
+            held_deps_ok = len(ancestors_needing_repair) == 0 and len(ancestors_in_temp) == 0
+            
+            if not held_deps_ok:
+                tasks_to_schedule.append((held_brick, "TEMP", True))
+                scheduled_set.add((held_brick, "TEMP"))
+                tasks_to_schedule.append((held_brick, "RESTORE_HELD", False))
+                scheduled_set.add((held_brick, "RESTORE_HELD"))
+                print(f"[QP-MILP] Held brick {held_brick}: deps not OK, TEMP then RESTORE_HELD")
+            else:
+                tasks_to_schedule.append((held_brick, "PLACE", False))
+                scheduled_set.add((held_brick, "PLACE"))
+                print(f"[QP-MILP] Held brick {held_brick}: deps OK, direct PLACE")
+        
+        # 需要修复的砖块
+        for brick_idx in repair_set:
+            if brick_idx == held_brick:
+                continue
+            
+            dependents = self.get_all_dependents(brick_idx)
+            blocking = []
+            for d in deviations:
+                if d["brick_idx"] in dependents and not d["is_in_temp"]:
+                    blocking.append(d["brick_idx"])
+            
+            for blocker in blocking:
+                if (blocker, "TEMP") not in scheduled_set:
+                    tasks_to_schedule.append((blocker, "TEMP", True))
+                    scheduled_set.add((blocker, "TEMP"))
+                    print(f"[QP-MILP] Brick {blocker}: blocking repair of {brick_idx}, TEMP")
+            
+            if (brick_idx, "REPAIR") not in scheduled_set:
+                tasks_to_schedule.append((brick_idx, "REPAIR", False))
+                scheduled_set.add((brick_idx, "REPAIR"))
+                print(f"[QP-MILP] Brick {brick_idx}: REPAIR task")
+            
+            for blocker in blocking:
+                if (blocker, "RESTORE") not in scheduled_set:
+                    tasks_to_schedule.append((blocker, "RESTORE", False))
+                    scheduled_set.add((blocker, "RESTORE"))
+                    print(f"[QP-MILP] Brick {blocker}: RESTORE after repair")
+        
+        # 【关键修复】临时位置的砖块必须全部恢复，不管有没有后续依赖
+        for temp_brick in self.bricks_in_temp.keys():
+            if temp_brick == held_brick:
+                continue
+            if (temp_brick, "RESTORE") in scheduled_set:
+                continue
+            if (temp_brick, "RESTORE_HELD") in scheduled_set:
+                continue
+            
+            # 【修复】无条件添加 RESTORE 任务 - 临时位置的砖块必须恢复到正确位置
+            tasks_to_schedule.append((temp_brick, "RESTORE", False))
+            scheduled_set.add((temp_brick, "RESTORE"))
+            print(f"[QP-MILP] Brick {temp_brick}: RESTORE from temp (MANDATORY)")
+        
+        # 正常放置任务
+        for brick_idx in remaining_sequence:
+            if brick_idx == held_brick:
+                continue
+            if brick_idx in repair_set:
+                continue
+            if brick_idx in self.bricks_in_temp:
+                continue
+            if (brick_idx, "NORMAL") not in scheduled_set:
+                tasks_to_schedule.append((brick_idx, "NORMAL", False))
+                scheduled_set.add((brick_idx, "NORMAL"))
+                print(f"[QP-MILP] Brick {brick_idx}: NORMAL place task")
+        
+        n_tasks = len(tasks_to_schedule)
+        
+        if n_tasks == 0:
+            print("[QP-MILP] No tasks to schedule")
+            return []
+        
+        print(f"\n[QP-MILP] Total tasks to schedule: {n_tasks}")
+        for i, (brick_idx, task_type, must_temp) in enumerate(tasks_to_schedule):
+            print(f"     Task {i}: brick={brick_idx}, type={task_type}, must_temp={must_temp}")
+        
+        # ========== Step 3: 构建 MILP 问题 ==========
+        
+        # 决策变量
+        order = cp.Variable(n_tasks, integer=True)
+        
+        # 目标函数: 最小化总执行时间
+        costs = []
+        for i, (brick_idx, task_type, must_temp) in enumerate(tasks_to_schedule):
+            # 第一个任务如果是放下手中砖块，只需要放置成本
+            if i == 0 and held_brick is not None and brick_idx == held_brick and task_type in ["PLACE", "TEMP"]:
+                base_cost = PLACE_ONLY_COST
+            else:
+                base_cost = FULL_PICK_PLACE_COST
+            costs.append(base_cost)
+        
+        total_cost = sum(costs)
+        objective = cp.Minimize(total_cost)
+        
+        # 约束
+        constraints = []
+        
+        # 约束 1: 顺序范围
+        constraints.append(order >= 0)
+        constraints.append(order <= n_tasks - 1)
+        
+        # 约束 2: AllDifferent (顺序互不相同)
+        for i in range(n_tasks):
+            for j in range(i + 1, n_tasks):
+                z = cp.Variable(boolean=True)
+                M = n_tasks
+                constraints.append(order[i] - order[j] >= 1 - M * z)
+                constraints.append(order[j] - order[i] >= 1 - M * (1 - z))
+        
+        # 约束 3: 如果手持砖块，第一个任务必须是处理它 (PLACE 或 TEMP)
+        if held_brick is not None:
+            for i, (brick_idx, task_type, _) in enumerate(tasks_to_schedule):
+                if brick_idx == held_brick and task_type in ["PLACE", "TEMP"]:
+                    constraints.append(order[i] == 0)
+                    print(f"[QP-MILP] Constraint: Task {i} (held brick {task_type}) must be order=0")
+                    break
+        
+        # 构建任务索引映射
+        task_indices = {}  # brick_idx -> [(task_idx, task_type)]
+        for i, (brick_idx, task_type, _) in enumerate(tasks_to_schedule):
+            if brick_idx not in task_indices:
+                task_indices[brick_idx] = []
+            task_indices[brick_idx].append((i, task_type))
+        
+        # 约束 4: 放置依赖 (NORMAL, PLACE, REPAIR, RESTORE, RESTORE_HELD 都需要依赖满足)
+        for i, (brick_idx, task_type, _) in enumerate(tasks_to_schedule):
+            if task_type in ["NORMAL", "PLACE", "REPAIR", "RESTORE", "RESTORE_HELD"]:
+                deps = self.get_dependencies_for_brick(brick_idx)
+                for dep in deps:
+                    # 依赖砖块必须已经在正确位置
+                    if dep in placed_correctly:
+                        # 已经正确放置，无需约束
+                        continue
+                    
+                    if dep in task_indices:
+                        # 找到依赖砖块的放置任务 (NORMAL, PLACE, REPAIR, RESTORE)
+                        for dep_task_idx, dep_task_type in task_indices[dep]:
+                            if dep_task_type in ["NORMAL", "PLACE", "REPAIR", "RESTORE", "RESTORE_HELD"]:
+                                constraints.append(order[dep_task_idx] <= order[i] - 1)
+                                print(f"[QP-MILP] Dep constraint: Task {dep_task_idx} ({dep}.{dep_task_type}) "
+                                      f"before Task {i} ({brick_idx}.{task_type})")
+        
+        # 约束 5: TEMP 必须在对应 REPAIR 之前，RESTORE 必须在 REPAIR 之后
+        for repair_brick in repair_set:
+            if repair_brick not in task_indices:
+                continue
+            
+            repair_task_idx = None
+            for idx, ttype in task_indices[repair_brick]:
+                if ttype == "REPAIR":
+                    repair_task_idx = idx
+                    break
+            
+            if repair_task_idx is None:
+                continue
+            
+            # 找出阻挡这个修复的砖块
+            dependents = self.get_all_dependents(repair_brick)
+            for blocker in dependents:
+                if blocker in task_indices:
+                    for idx, ttype in task_indices[blocker]:
+                        if ttype == "TEMP":
+                            constraints.append(order[idx] <= order[repair_task_idx] - 1)
+                            print(f"[QP-MILP] Constraint: TEMP {idx} before REPAIR {repair_task_idx}")
+                        elif ttype == "RESTORE":
+                            constraints.append(order[idx] >= order[repair_task_idx] + 1)
+                            print(f"[QP-MILP] Constraint: RESTORE {idx} after REPAIR {repair_task_idx}")
+        
+        # 约束 6: RESTORE_HELD 必须在所有阻挡它的 REPAIR 完成之后
+        if held_brick is not None and not held_deps_ok:
+            restore_held_idx = None
+            for i, (brick_idx, task_type, _) in enumerate(tasks_to_schedule):
+                if brick_idx == held_brick and task_type == "RESTORE_HELD":
+                    restore_held_idx = i
+                    break
+            
+            if restore_held_idx is not None:
+                ancestors = self.get_all_ancestors(held_brick)
+                for ancestor in ancestors:
+                    if ancestor in repair_set and ancestor in task_indices:
+                        for idx, ttype in task_indices[ancestor]:
+                            if ttype == "REPAIR":
+                                constraints.append(order[restore_held_idx] >= order[idx] + 1)
+                                print(f"[QP-MILP] Constraint: RESTORE_HELD {restore_held_idx} "
+                                      f"after REPAIR {idx} (ancestor {ancestor})")
+                    # 也要在临时位置砖块恢复之后
+                    if ancestor in self.bricks_in_temp and ancestor in task_indices:
+                        for idx, ttype in task_indices[ancestor]:
+                            if ttype == "RESTORE":
+                                constraints.append(order[restore_held_idx] >= order[idx] + 1)
+                                print(f"[QP-MILP] Constraint: RESTORE_HELD {restore_held_idx} "
+                                      f"after RESTORE {idx} (ancestor {ancestor} in temp)")
+
+        # ========== 【新增】约束 7: 依赖临时位置砖块的任务必须在 RESTORE 之后 ==========
+        # 如果砖块 A 被移到临时位置，那么所有依赖 A 的砖块必须在 A 恢复之后才能放置
+        for temp_brick in self.bricks_in_temp.keys():
+            if temp_brick not in task_indices:
+                continue
+            
+            # 找到这个砖块的 RESTORE 任务
+            restore_task_idx = None
+            for idx, ttype in task_indices[temp_brick]:
+                if ttype in ["RESTORE", "RESTORE_HELD"]:
+                    restore_task_idx = idx
+                    break
+            
+            if restore_task_idx is None:
+                continue
+            
+            # 找出所有依赖这个临时砖块的任务
+            for i, (brick_idx, task_type, _) in enumerate(tasks_to_schedule):
+                if task_type in ["NORMAL", "PLACE", "REPAIR", "RESTORE", "RESTORE_HELD"]:
+                    # 检查这个任务的砖块是否依赖临时位置的砖块
+                    deps = self.get_dependencies_for_brick(brick_idx)
+                    if temp_brick in deps:
+                        # 这个任务依赖临时位置的砖块，必须在 RESTORE 之后
+                        if i != restore_task_idx:  # 不是自己
+                            constraints.append(order[i] >= order[restore_task_idx] + 1)
+                            print(f"[QP-MILP] Temp-dep constraint: Task {i} ({brick_idx}.{task_type}) "
+                                  f"must be after RESTORE {restore_task_idx} (temp brick {temp_brick})")
+        
+        # ========== 【新增】约束 8: TEMP 任务中，依赖关系也要考虑 ==========
+        # 如果将要被 TEMP 的砖块被其他任务依赖，那些任务必须等 RESTORE 完成
+        for i, (brick_idx, task_type, _) in enumerate(tasks_to_schedule):
+            if task_type == "TEMP":
+                # 找到对应的 RESTORE 任务
+                restore_task_idx = None
+                for idx, ttype in task_indices.get(brick_idx, []):
+                    if ttype in ["RESTORE", "RESTORE_HELD"]:
+                        restore_task_idx = idx
+                        break
+                
+                if restore_task_idx is None:
+                    continue
+                
+                # 找出所有依赖这个砖块的其他任务
+                for j, (other_brick, other_type, _) in enumerate(tasks_to_schedule):
+                    if other_type in ["NORMAL", "PLACE"]:
+                        deps = self.get_dependencies_for_brick(other_brick)
+                        if brick_idx in deps:
+                            # 这个任务依赖将被 TEMP 的砖块
+                            constraints.append(order[j] >= order[restore_task_idx] + 1)
+                            print(f"[QP-MILP] Future-temp-dep: Task {j} ({other_brick}.{other_type}) "
+                                  f"must wait for RESTORE {restore_task_idx} of brick {brick_idx}")
+                                    
+        # ========== Step 4: 求解 ==========
+        print(f"\n[QP-MILP] Solving MILP with {len(constraints)} constraints...")
+        
+        prob = cp.Problem(objective, constraints)
+        
+        solvers_to_try = [cp.GLPK_MI, cp.CBC, cp.SCIP, cp.ECOS_BB]
+        solved = False
+        
+        for solver in solvers_to_try:
+            try:
+                prob.solve(solver=solver, verbose=False)
+                if prob.status in [cp.OPTIMAL, cp.OPTIMAL_INACCURATE]:
+                    solved = True
+                    print(f"[QP-MILP] Solved with {solver}! Status: {prob.status}")
+                    break
+            except Exception as e:
+                print(f"[QP-MILP] Solver {solver} failed: {e}")
+                continue
+        
+        if not solved:
+            raise RuntimeError(f"[QP-MILP] Failed to solve! Status: {prob.status}")
+        
+        # ========== Step 5: 构建任务序列 ==========
+        # 【修复】对 order 值取整
+        order_values = [int(round(v)) for v in order.value]
+        print(f"\n[QP-MILP] Solution order: {order_values}")
+        
+        # 按顺序排列任务
+        sorted_indices = sorted(range(n_tasks), key=lambda i: order_values[i])
+        
+        task_sequence = []
+        
+# 在 _solve_with_milp 方法的 Step 5 中，修改 REPAIR/RESTORE 部分
+
+        for task_idx in sorted_indices:
+            brick_idx, task_type, must_temp = tasks_to_schedule[task_idx]
+            goal = self.env.compute_goal_pose_from_layout(brick_idx)
+            level = self._get_brick_level(brick_idx)
+            
+            if task_type == "TEMP":
+                # 放到临时位置
+                temp_pos = self.get_temp_position_for_brick(brick_idx)
+                is_held_first = (brick_idx == held_brick and order_values[task_idx] == 0)
+                task_sequence.append(TaskItem(
                     task_type=TaskType.TEMP_PLACE,
-                    brick_idx=blocker["brick_idx"],
-                    brick_id=blocker["brick_id"],
+                    brick_idx=brick_idx,
+                    brick_id=self.env.brick_ids[brick_idx],
                     target_pos=temp_pos,
                     target_orn=(0.0, 0.0, 0.0),
-                    level=blocker["level"],
-                    priority=0,
-                    reason=f"Move to temp (blocking repair of brick {brick_idx})",
-                    is_temp=True
+                    level=level,
+                    priority=len(task_sequence),
+                    reason=f"MILP: temp placement",
+                    is_temp=True,
+                    estimated_cost=PLACE_ONLY_COST if is_held_first else FULL_PICK_PLACE_COST
                 ))
-                scheduled_indices.add(blocker["brick_idx"])
-        
-        # Step 4: 递归修复依赖（从底层开始）
-        for dep in deps_needing_repair:
-            if dep["brick_idx"] not in scheduled_indices:
-                dep_tasks = self._plan_repair_sequence(dep, all_deviations, bricks_to_repair, scheduled_indices)
-                tasks.extend(dep_tasks)
-        
-        # Step 5: 修复当前砖块
-        if brick_idx not in scheduled_indices:
-            tasks.append(TaskItem(
-                task_type=TaskType.REPAIR_PLACE,
-                brick_idx=brick_idx,
-                brick_id=brick_to_repair["brick_id"],
-                target_pos=tuple(brick_to_repair["expected_pos"]),
-                target_orn=brick_to_repair["expected_orn"],
-                level=brick_to_repair["level"],
-                priority=1,
-                reason=f"Repair (deviation={brick_to_repair['deviation']*1000:.1f}mm)"
-            ))
-            scheduled_indices.add(brick_idx)
-        
-        # Step 6: 放回阻挡的砖块（从底层开始）
-        blocking.sort(key=lambda x: x["level"])
-        for blocker in blocking:
-            blocker_goal = self.env.compute_goal_pose_from_layout(blocker["brick_idx"])
-            # 检查是否已经安排了恢复任务
-            already_scheduled_restore = any(
-                t.brick_idx == blocker["brick_idx"] and t.task_type == TaskType.REPAIR_PLACE 
-                for t in tasks
-            )
-            if not already_scheduled_restore:
-                tasks.append(TaskItem(
+                
+            elif task_type in ["NORMAL", "PLACE"]:
+                # 正常放置
+                is_held_first = (brick_idx == held_brick and order_values[task_idx] == 0)
+                task_sequence.append(TaskItem(
+                    task_type=TaskType.NORMAL_PLACE,
+                    brick_idx=brick_idx,
+                    brick_id=self.env.brick_ids[brick_idx],
+                    target_pos=goal[:3],
+                    target_orn=goal[3:],
+                    level=level,
+                    priority=len(task_sequence),
+                    reason=f"MILP: normal placement",
+                    estimated_cost=PLACE_ONLY_COST if is_held_first else FULL_PICK_PLACE_COST
+                ))
+                
+            elif task_type in ["REPAIR", "RESTORE", "RESTORE_HELD"]:
+                # 【关键修复】区分 REPAIR 和 RESTORE
+                if task_type == "REPAIR":
+                    # REPAIR: 砖块在原位但偏移了，使用 deviation_map 中的期望位置
+                    if brick_idx in deviation_map:
+                        d = deviation_map[brick_idx]
+                        # 【修复】检查 deviation_map 中的位置是否是临时位置
+                        # 如果是临时位置，应该使用 layout 中的正确位置
+                        if d.get("is_in_temp", False):
+                            target_pos = goal[:3]
+                            target_orn = goal[3:]
+                            reason = f"MILP: repair (from temp)"
+                        else:
+                            target_pos = tuple(d["expected_pos"])
+                            target_orn = d["expected_orn"]
+                            reason = f"MILP: repair (dev={d['deviation']*1000:.1f}mm)"
+                    else:
+                        target_pos = goal[:3]
+                        target_orn = goal[3:]
+                        reason = f"MILP: repair"
+                else:
+                    # RESTORE / RESTORE_HELD: 砖块在临时位置，需要恢复到正确位置
+                    # 【关键】始终使用 layout 中定义的正确目标位置
+                    target_pos = goal[:3]
+                    target_orn = goal[3:]
+                    reason = f"MILP: {task_type.lower()} (to correct position)"
+                
+                task_sequence.append(TaskItem(
                     task_type=TaskType.REPAIR_PLACE,
-                    brick_idx=blocker["brick_idx"],
-                    brick_id=blocker["brick_id"],
-                    target_pos=blocker_goal[:3],
-                    target_orn=blocker_goal[3:],
-                    level=blocker["level"],
-                    priority=2,
-                    reason=f"Restore after repair of brick {brick_idx}"
+                    brick_idx=brick_idx,
+                    brick_id=self.env.brick_ids[brick_idx],
+                    target_pos=target_pos,
+                    target_orn=target_orn,
+                    level=level,
+                    priority=len(task_sequence),
+                    reason=reason,
+                    estimated_cost=FULL_PICK_PLACE_COST
                 ))
         
-        return tasks
-
+        print(f"\n[QP-MILP] Generated {len(task_sequence)} tasks")
+        print("[QP-MILP] ═══════════════════════════════════════════════\n")
+        
+        return task_sequence
+    # ================== 主入口 ==================
     
     def plan_task_sequence(self, 
                           current_brick_idx: int,
                           remaining_sequence: List[int],
                           is_holding_brick: bool = False) -> List[TaskItem]:
         """
-        规划任务序列
+        规划任务序列（主入口）
         
-        核心逻辑：
-        1. 检查所有需要修复的砖块
-        2. 对于要放置的每个砖块，检查其所有祖先依赖是否需要修复
-        3. 按正确的顺序修复（底层先修复，移走阻挡的砖块）
+        使用 MILP 优化求解最优任务序列，最小化执行时间
         """
         print(f"\n[QP] ═══════════════════════════════════════════════════")
-        print(f"[QP] Planning task sequence...")
+        print(f"[QP] Planning task sequence with MILP optimization...")
         print(f"[QP] Current brick: {current_brick_idx}")
         print(f"[QP] Remaining sequence: {remaining_sequence}")
         print(f"[QP] Is holding brick: {is_holding_brick}")
-        print(f"[QP] Bricks in temp positions: {list(self.bricks_in_temp.keys())}")
+        print(f"[QP] Bricks in temp: {list(self.bricks_in_temp.keys())}")
         
+        # 获取需要修复的砖块
+        bricks_needing_repair = self.get_bricks_needing_repair()
+        
+        # 打印当前状态
         deviations = self.check_all_placed_bricks()
-        bricks_to_repair = [d for d in deviations if d["needs_repair"]]
-        
         print(f"[QP] Checking {len(deviations)} placed bricks:")
         for d in deviations:
             if d["is_in_temp"]:
@@ -453,212 +708,376 @@ class QPTaskScheduler:
                 status = "⚠️ NEED REPAIR"
             else:
                 status = "✓ OK"
-            print(f"     Brick idx={d['brick_idx']}: deviation={d['deviation']*1000:.2f}mm {status}")
+            print(f"     Brick {d['brick_idx']}: deviation={d['deviation']*1000:.2f}mm {status}")
         
-        task_sequence = []
-        scheduled_indices = set()
+        # 使用 MILP 求解
+        task_sequence = self._solve_with_milp(
+            current_brick_idx, remaining_sequence,
+            bricks_needing_repair, is_holding_brick
+        )
         
-        # ========== 场景 1: 正在抓着砖块 ==========
-        if is_holding_brick and current_brick_idx is not None:
-            current_goal = self.env.compute_goal_pose_from_layout(current_brick_idx)
-            current_level = self._get_brick_level(current_brick_idx)
-            
-            # 获取所有祖先依赖
-            all_ancestors = self.get_all_ancestors(current_brick_idx)
-            
-            # 检查哪些祖先需要修复
-            ancestors_needing_repair = [d for d in bricks_to_repair if d["brick_idx"] in all_ancestors]
-            
-            # 检查依赖是否在临时位置
-            deps_in_temp = [idx for idx in all_ancestors if self.is_brick_in_temp(idx)]
-            
-            print(f"[QP] Brick {current_brick_idx} ancestors: {all_ancestors}")
-            print(f"[QP] Ancestors needing repair: {[d['brick_idx'] for d in ancestors_needing_repair]}")
-            print(f"[QP] Ancestors in temp: {deps_in_temp}")
-            
-            if ancestors_needing_repair or deps_in_temp:
-                print(f"[QP] ⚠️ Ancestors need attention, placing current brick to temp first")
-                
-                # Step 1: 把当前砖块放到临时位置（基于期望位置计算）
-                temp_pos = self.get_temp_position_for_brick(current_brick_idx)
-                task_sequence.append(TaskItem(
-                    task_type=TaskType.TEMP_PLACE,
-                    brick_idx=current_brick_idx,
-                    brick_id=self.env.brick_ids[current_brick_idx],
-                    target_pos=temp_pos,
-                    target_orn=(0.0, 0.0, 0.0),
-                    level=current_level,
-                    priority=0,
-                    reason="Move to temp (ancestors need attention)",
-                    is_temp=True
-                ))
-                scheduled_indices.add(current_brick_idx)
-                
-                # Step 2: 按层级从低到高修复祖先
-                ancestors_needing_repair.sort(key=lambda x: x["level"])
-                for ancestor in ancestors_needing_repair:
-                    repair_tasks = self._plan_repair_sequence(
-                        ancestor, deviations, bricks_to_repair, scheduled_indices
-                    )
-                    task_sequence.extend(repair_tasks)
-                
-                # Step 3: 恢复在临时位置的依赖砖块
-                deps_in_temp.sort(key=lambda x: self._get_brick_level(x))
-                for dep_idx in deps_in_temp:
-                    if dep_idx not in scheduled_indices:
-                        dep_goal = self.env.compute_goal_pose_from_layout(dep_idx)
-                        task_sequence.append(TaskItem(
-                            task_type=TaskType.REPAIR_PLACE,
-                            brick_idx=dep_idx,
-                            brick_id=self.env.brick_ids[dep_idx],
-                            target_pos=dep_goal[:3],
-                            target_orn=dep_goal[3:],
-                            level=self._get_brick_level(dep_idx),
-                            priority=4,
-                            reason="Restore from temp (needed as ancestor)"
-                        ))
-                        scheduled_indices.add(dep_idx)
-                
-                # Step 4: 把当前砖块放回正确位置
-                task_sequence.append(TaskItem(
-                    task_type=TaskType.REPAIR_PLACE,
-                    brick_idx=current_brick_idx,
-                    brick_id=self.env.brick_ids[current_brick_idx],
-                    target_pos=current_goal[:3],
-                    target_orn=current_goal[3:],
-                    level=current_level,
-                    priority=5,
-                    reason="Restore from temp after ancestors fixed"
-                ))
-                
-            else:
-                # 祖先都正常，正常放置
-                task_sequence.append(TaskItem(
-                    task_type=TaskType.NORMAL_PLACE,
-                    brick_idx=current_brick_idx,
-                    brick_id=self.env.brick_ids[current_brick_idx],
-                    target_pos=current_goal[:3],
-                    target_orn=current_goal[3:],
-                    level=current_level,
-                    priority=0,
-                    reason="Normal placement"
-                ))
-                scheduled_indices.add(current_brick_idx)
+        # 计算总成本
+        total_cost = sum(t.estimated_cost for t in task_sequence)
         
-        # ========== 场景 2: 没有抓着砖块 ==========
-        else:
-            # 处理当前砖块
-            if current_brick_idx is not None:
-                all_ancestors = self.get_all_ancestors(current_brick_idx)
-                ancestors_needing_repair = [d for d in bricks_to_repair if d["brick_idx"] in all_ancestors]
-                
-                if ancestors_needing_repair:
-                    print(f"[QP] ⚠️ Must repair ancestors first: {[d['brick_idx'] for d in ancestors_needing_repair]}")
-                    
-                    # 按层级从低到高修复
-                    ancestors_needing_repair.sort(key=lambda x: x["level"])
-                    for ancestor in ancestors_needing_repair:
-                        if ancestor["brick_idx"] not in scheduled_indices:
-                            repair_tasks = self._plan_repair_sequence(
-                                ancestor, deviations, bricks_to_repair, scheduled_indices
-                            )
-                            task_sequence.extend(repair_tasks)
-        
-        # ========== 添加剩余的正常任务（带依赖检查）==========
-        for brick_idx in remaining_sequence:
-            if brick_idx in scheduled_indices:
-                continue
-            if brick_idx in self.bricks_in_temp:
-                continue
-            
-            # 检查这个砖块的所有祖先是否需要修复或在临时位置
-            all_ancestors = self.get_all_ancestors(brick_idx)
-            
-            # 先处理需要修复的祖先
-            ancestors_needing_repair = [d for d in bricks_to_repair 
-                                        if d["brick_idx"] in all_ancestors 
-                                        and d["brick_idx"] not in scheduled_indices]
-            ancestors_needing_repair.sort(key=lambda x: x["level"])
-            
-            for ancestor in ancestors_needing_repair:
-                repair_tasks = self._plan_repair_sequence(
-                    ancestor, deviations, bricks_to_repair, scheduled_indices
-                )
-                task_sequence.extend(repair_tasks)
-            
-            # 再处理在临时位置的祖先
-            ancestors_in_temp = [idx for idx in all_ancestors 
-                                if self.is_brick_in_temp(idx) 
-                                and idx not in scheduled_indices]
-            ancestors_in_temp.sort(key=lambda x: self._get_brick_level(x))
-            
-            for temp_idx in ancestors_in_temp:
-                temp_goal = self.env.compute_goal_pose_from_layout(temp_idx)
-                task_sequence.append(TaskItem(
-                    task_type=TaskType.REPAIR_PLACE,
-                    brick_idx=temp_idx,
-                    brick_id=self.env.brick_ids[temp_idx],
-                    target_pos=temp_goal[:3],
-                    target_orn=temp_goal[3:],
-                    level=self._get_brick_level(temp_idx),
-                    priority=8,
-                    reason=f"Restore from temp (needed for brick {brick_idx})"
-                ))
-                scheduled_indices.add(temp_idx)
-            
-            # 添加正常放置任务
-            goal = self.env.compute_goal_pose_from_layout(brick_idx)
-            level = self._get_brick_level(brick_idx)
-            task_sequence.append(TaskItem(
-                task_type=TaskType.NORMAL_PLACE,
-                brick_idx=brick_idx,
-                brick_id=self.env.brick_ids[brick_idx],
-                target_pos=goal[:3],
-                target_orn=goal[3:],
-                level=level,
-                priority=10 + brick_idx,
-                reason="Normal sequence"
-            ))
-            scheduled_indices.add(brick_idx)
-        
-        # ========== 最后检查：临时位置的砖块 ==========
-        for temp_brick_idx in list(self.bricks_in_temp.keys()):
-            if temp_brick_idx not in scheduled_indices:
-                # 检查是否有后续任务需要它
-                has_dependents = any(
-                    temp_brick_idx in self.get_all_ancestors(idx) 
-                    for idx in remaining_sequence
-                )
-                
-                if has_dependents:
-                    temp_brick_goal = self.env.compute_goal_pose_from_layout(temp_brick_idx)
-                    task_sequence.append(TaskItem(
-                        task_type=TaskType.REPAIR_PLACE,
-                        brick_idx=temp_brick_idx,
-                        brick_id=self.env.brick_ids[temp_brick_idx],
-                        target_pos=temp_brick_goal[:3],
-                        target_orn=temp_brick_goal[3:],
-                        level=self._get_brick_level(temp_brick_idx),
-                        priority=9,
-                        reason="Restore from temp (has dependents)"
-                    ))
-                    scheduled_indices.add(temp_brick_idx)
-        
-        # 打印最终任务序列
-        print(f"\n[QP] Planned task sequence ({len(task_sequence)} tasks):")
+        # 打印结果
+        print(f"\n[QP] Planned {len(task_sequence)} tasks (est. time: {total_cost:.1f}s):")
         for i, task in enumerate(task_sequence):
             temp_marker = " [TEMP]" if task.is_temp else ""
-            print(f"     [{i}] {task.task_type.value}: brick_idx={task.brick_idx}, "
-                  f"level={task.level}{temp_marker}, reason={task.reason}")
+            print(f"     [{i}] {task.task_type.value}: brick={task.brick_idx}, "
+                  f"cost={task.estimated_cost:.1f}s{temp_marker}")
+            print(f"         reason: {task.reason}")
         print(f"[QP] ═══════════════════════════════════════════════════\n")
         
         return task_sequence
+
+# """
+# 简化版任务调度器
+# 功能: 基于距离选择最近的可用砖块，按 Level 顺序填充槽位
+# """
+
+# import numpy as np
+# import pybullet as p
+# from typing import List, Dict, Set, Optional, Tuple
+# from enum import Enum
+# from dataclasses import dataclass
+
+
+# class TaskType(Enum):
+#     """任务类型枚举"""
+#     NORMAL_PLACE = "normal_place"      # 正常放置新砖块
+
+
+# class SlotStatus(Enum):
+#     """槽位状态"""
+#     EMPTY = "empty"
+#     FILLED = "filled"
+
+
+# @dataclass
+# class Slot:
+#     """目标槽位"""
+#     slot_idx: int
+#     level: int
+#     goal_pos: np.ndarray
+#     goal_orn: np.ndarray
+#     status: SlotStatus = SlotStatus.EMPTY
+#     filled_brick_id: Optional[int] = None
+
+
+# @dataclass
+# class TaskItem:
+#     """任务项"""
+#     task_type: TaskType
+#     brick_idx: int
+#     brick_id: int
+#     source_pos: Tuple[float, float, float]
+#     target_pos: Tuple[float, float, float]
+#     target_orn: Tuple[float, float, float]
+#     level: int
+#     slot_idx: int
+#     reason: str = ""
+#     estimated_cost: float = 0.0
     
-    def _get_brick_level(self, brick_idx: int) -> int:
-        if hasattr(self.env, 'layout_targets') and brick_idx < len(self.env.layout_targets):
-            return self.env.layout_targets[brick_idx]["level"]
-        return 0
+#     def to_goal_pose(self) -> Tuple[float, float, float, float, float, float]:
+#         return (*self.target_pos, *self.target_orn)
+
+
+# class QPTaskScheduler:
+#     """简化版任务调度器：距离优先 + Level 顺序"""
     
-    def should_replan(self) -> bool:
-        bricks_to_repair = self.get_bricks_needing_repair()
-        return len(bricks_to_repair) > 0
+#     def __init__(self, env, 
+#                  fill_threshold=0.05):  # 5cm 以内视为已填充
+        
+#         self.env = env
+#         self.fill_threshold = fill_threshold
+        
+#         # 砖块尺寸
+#         self.brick_L, self.brick_W, self.brick_H = env.cfg["brick"]["size_LWH"]
+#         self.ground_z = env.get_ground_top() if hasattr(env, 'get_ground_top') else 0.0
+        
+#         # 初始化槽位
+#         self._init_slots()
+        
+#         # 已放置砖块集合 (brick_id)
+#         self.placed_brick_ids: Set[int] = set()
+        
+#         self._print_init_info()
+    
+#     def _init_slots(self):
+#         """从 layout 初始化槽位"""
+#         self.slots: List[Slot] = []
+        
+#         if not hasattr(self.env, 'layout_targets'):
+#             self.env._parse_layout()
+        
+#         layout_targets = self.env.layout_targets
+#         yaw = self.env.cfg["goal"]["yaw"]
+        
+#         for idx, target in enumerate(layout_targets):
+#             level = target["level"]
+#             xy = target["xy"]
+#             gz = self.ground_z + self.brick_H / 2 + level * self.brick_H
+            
+#             self.slots.append(Slot(
+#                 slot_idx=idx,
+#                 level=level,
+#                 goal_pos=np.array([xy[0], xy[1], gz]),
+#                 goal_orn=np.array([0.0, 0.0, yaw]),
+#                 status=SlotStatus.EMPTY
+#             ))
+        
+#         # 按 level 排序
+#         self.slots.sort(key=lambda s: (s.level, s.slot_idx))
+#         self.max_level = max(s.level for s in self.slots) if self.slots else 0
+    
+#     def _print_init_info(self):
+#         """打印初始化信息"""
+#         print(f"\n[QP] ═══════════════════════════════════════════════════")
+#         print(f"[QP] 简化版调度器初始化 (距离优先 + Level顺序)")
+#         print(f"[QP] 填充阈值: < {self.fill_threshold*100:.1f}cm")
+#         print(f"[QP] 槽位信息:")
+#         for level in range(self.max_level + 1):
+#             level_slots = [s for s in self.slots if s.level == level]
+#             print(f"     Level {level}: {len(level_slots)} 个槽位")
+#         print(f"[QP] ═══════════════════════════════════════════════════\n")
+    
+#     # ================== TCP 位置 ==================
+    
+#     def get_current_tcp_position(self) -> np.ndarray:
+#         """获取当前 TCP 位置"""
+#         if hasattr(self.env, 'robot_model'):
+#             rm = self.env.robot_model
+#             tcp_state = p.getLinkState(rm.id, rm.ee_link)
+#             return np.array(tcp_state[0])
+#         return np.array([0.0, 0.0, 0.5])
+    
+#     # ================== 槽位状态管理 ==================
+    
+#     def update_slot_status(self):
+#         """更新所有槽位的状态"""
+#         # 重置
+#         for slot in self.slots:
+#             slot.status = SlotStatus.EMPTY
+#             slot.filled_brick_id = None
+        
+#         # 检查每个砖块
+#         for brick_id in self.env.brick_ids:
+#             if brick_id in self.placed_brick_ids:
+#                 continue  # 已标记为放置，跳过重复检查
+            
+#             try:
+#                 pos, _ = p.getBasePositionAndOrientation(brick_id)
+#                 pos = np.array(pos)
+                
+#                 # 找最匹配的槽位
+#                 best_slot = None
+#                 best_dist = float('inf')
+                
+#                 for slot in self.slots:
+#                     if slot.filled_brick_id is not None:
+#                         continue  # 已被其他砖块占用
+                    
+#                     # XY 距离
+#                     xy_dist = np.linalg.norm(pos[:2] - slot.goal_pos[:2])
+#                     # Z 高度差
+#                     z_diff = abs(pos[2] - slot.goal_pos[2])
+                    
+#                     # Z 高度必须接近
+#                     if z_diff > self.brick_H * 0.8:
+#                         continue
+                    
+#                     if xy_dist < best_dist and xy_dist < self.fill_threshold:
+#                         best_dist = xy_dist
+#                         best_slot = slot
+                
+#                 if best_slot is not None:
+#                     best_slot.status = SlotStatus.FILLED
+#                     best_slot.filled_brick_id = brick_id
+#                     self.placed_brick_ids.add(brick_id)
+                    
+#             except Exception as e:
+#                 print(f"[QP] Error checking brick {brick_id}: {e}")
+    
+#     def get_empty_slots_in_level(self, level: int) -> List[Slot]:
+#         """获取某层的空槽位"""
+#         return [s for s in self.slots if s.level == level and s.status == SlotStatus.EMPTY]
+    
+#     def is_level_complete(self, level: int) -> bool:
+#         """检查某层是否完成"""
+#         level_slots = [s for s in self.slots if s.level == level]
+#         return all(s.status == SlotStatus.FILLED for s in level_slots)
+    
+#     def get_current_working_level(self) -> int:
+#         """获取当前应该工作的 Level"""
+#         for level in range(self.max_level + 1):
+#             if not self.is_level_complete(level):
+#                 return level
+#         return self.max_level
+    
+#     def all_slots_filled(self) -> bool:
+#         """检查是否所有槽位都已填充"""
+#         return all(s.status == SlotStatus.FILLED for s in self.slots)
+    
+#     # ================== 砖块选择 ==================
+    
+#     def get_available_bricks(self) -> List[Tuple[int, int, np.ndarray]]:
+#         """
+#         获取所有可用砖块（未被放置到槽位的）
+        
+#         Returns:
+#             List of (brick_idx, brick_id, position)
+#         """
+#         available = []
+        
+#         for idx, brick_id in enumerate(self.env.brick_ids):
+#             # 跳过已放置的
+#             if brick_id in self.placed_brick_ids:
+#                 continue
+            
+#             try:
+#                 pos, _ = p.getBasePositionAndOrientation(brick_id)
+#                 pos = np.array(pos)
+#                 available.append((idx, brick_id, pos))
+#             except:
+#                 pass
+        
+#         return available
+    
+#     def find_nearest_brick(self, tcp_pos: np.ndarray) -> Optional[Tuple[int, int, np.ndarray]]:
+#         """找到距离 TCP 最近的可用砖块"""
+#         available = self.get_available_bricks()
+        
+#         if not available:
+#             return None
+        
+#         # 按距离排序
+#         available.sort(key=lambda b: np.linalg.norm(b[2] - tcp_pos))
+        
+#         return available[0]
+    
+#     def find_nearest_slot(self, empty_slots: List[Slot], brick_pos: np.ndarray) -> Slot:
+#         """找到距离砖块最近的空槽位"""
+#         return min(empty_slots, key=lambda s: np.linalg.norm(s.goal_pos[:2] - brick_pos[:2]))
+    
+#     # ================== 距离计算 ==================
+    
+#     def calculate_task_distance(self, brick_pos: np.ndarray, 
+#                                  slot_pos: np.ndarray, 
+#                                  tcp_pos: np.ndarray) -> float:
+#         """计算任务总距离"""
+#         d1 = np.linalg.norm(tcp_pos - brick_pos)  # TCP -> 砖块
+#         d2 = np.linalg.norm(brick_pos - slot_pos)  # 砖块 -> 槽位
+#         return d1 + d2
+    
+#     # ================== 主规划方法 ==================
+    
+#     def plan_next_task(self) -> Optional[TaskItem]:
+#         """
+#         规划下一个任务
+        
+#         策略：
+#         1. 更新槽位状态
+#         2. 找当前工作 Level 的空槽位
+#         3. 选择距离 TCP 最近的可用砖块
+#         4. 选择距离砖块最近的空槽位
+#         """
+#         # 更新状态
+#         self.update_slot_status()
+        
+#         tcp_pos = self.get_current_tcp_position()
+        
+#         print(f"\n[QP] ═══════════════════════════════════════════════════")
+#         print(f"[QP] 规划下一个任务")
+#         print(f"[QP] TCP 位置: ({tcp_pos[0]:.3f}, {tcp_pos[1]:.3f}, {tcp_pos[2]:.3f})")
+        
+#         # 打印槽位状态
+#         self._print_slot_status()
+        
+#         # 检查是否完成
+#         if self.all_slots_filled():
+#             print(f"[QP] ✅ 所有槽位已填充!")
+#             print(f"[QP] ═══════════════════════════════════════════════════\n")
+#             return None
+        
+#         # 获取当前工作 Level
+#         current_level = self.get_current_working_level()
+#         print(f"[QP] 当前工作 Level: {current_level}")
+        
+#         # 获取空槽位
+#         empty_slots = self.get_empty_slots_in_level(current_level)
+        
+#         if not empty_slots:
+#             print(f"[QP] Level {current_level} 没有空槽位")
+#             print(f"[QP] ═══════════════════════════════════════════════════\n")
+#             return None
+        
+#         print(f"[QP] Level {current_level} 有 {len(empty_slots)} 个空槽位")
+        
+#         # 找最近的可用砖块
+#         nearest_brick = self.find_nearest_brick(tcp_pos)
+        
+#         if nearest_brick is None:
+#             print(f"[QP] ⚠️ 没有可用砖块!")
+#             print(f"[QP] ═══════════════════════════════════════════════════\n")
+#             return None
+        
+#         brick_idx, brick_id, brick_pos = nearest_brick
+#         print(f"[QP] 选择砖块: idx={brick_idx}, id={brick_id}")
+#         print(f"[QP] 砖块位置: ({brick_pos[0]:.3f}, {brick_pos[1]:.3f}, {brick_pos[2]:.3f})")
+        
+#         # 找最近的空槽位
+#         target_slot = self.find_nearest_slot(empty_slots, brick_pos)
+#         print(f"[QP] 目标槽位: Level {target_slot.level}, Slot {target_slot.slot_idx}")
+#         print(f"[QP] 目标位置: ({target_slot.goal_pos[0]:.3f}, {target_slot.goal_pos[1]:.3f}, {target_slot.goal_pos[2]:.3f})")
+        
+#         # 计算距离
+#         total_dist = self.calculate_task_distance(brick_pos, target_slot.goal_pos, tcp_pos)
+#         print(f"[QP] 预计距离: {total_dist:.2f}m")
+        
+#         task = TaskItem(
+#             task_type=TaskType.NORMAL_PLACE,
+#             brick_idx=brick_idx,
+#             brick_id=brick_id,
+#             source_pos=tuple(brick_pos),
+#             target_pos=tuple(target_slot.goal_pos),
+#             target_orn=tuple(target_slot.goal_orn),
+#             level=target_slot.level,
+#             slot_idx=target_slot.slot_idx,
+#             reason=f"放置到 Level {target_slot.level} 槽位 {target_slot.slot_idx}",
+#             estimated_cost=total_dist
+#         )
+        
+#         print(f"[QP] ═══════════════════════════════════════════════════\n")
+        
+#         return task
+    
+#     def _print_slot_status(self):
+#         """打印槽位状态"""
+#         print(f"[QP] 槽位状态:")
+#         for level in range(self.max_level + 1):
+#             level_slots = [s for s in self.slots if s.level == level]
+#             status_str = "  ".join([
+#                 f"S{s.slot_idx}:{'✓' if s.status == SlotStatus.FILLED else '○'}"
+#                 for s in level_slots
+#             ])
+#             print(f"     Level {level}:   {status_str}")
+        
+#         available = self.get_available_bricks()
+#         print(f"[QP] 可用砖块: {len(available)} 个")
+    
+#     def mark_brick_placed(self, brick_id: int):
+#         """标记砖块已放置"""
+#         self.placed_brick_ids.add(brick_id)
+#         print(f"[QP] 标记砖块 {brick_id} 为已放置")
+    
+#     def get_slot_status_string(self) -> str:
+#         """获取槽位状态字符串（用于打印）"""
+#         lines = ["[QP] 槽位状态:"]
+#         for level in range(self.max_level + 1):
+#             level_slots = [s for s in self.slots if s.level == level]
+#             status_str = "  ".join([
+#                 f"S{s.slot_idx}:{'✓' if s.status == SlotStatus.FILLED else '○'}"
+#                 for s in level_slots
+#             ])
+#             lines.append(f"     Level {level}:   {status_str}")
+#         return "\n".join(lines)
