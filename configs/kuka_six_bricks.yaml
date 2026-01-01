@@ -180,6 +180,23 @@ llm:
   enabled: false
   mode: "multi_agent"  # mode: "multi_agent" or "single_agent" 
   client: "openai"
-  model: "gpt-4o-mini"
+  model: "qwen-plus-2025-12-01"
   temperature: 0.0  
-  api_key: "NONE"
+  api_key: "None"
+  base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"          # 新增：可选，用于自定义 API 端点
+  max_workers: 3          # 新增：线程池工作线程数
+  timeout: 15.0           # 新增：API 调用超时时间（秒）
+  async_enabled: true     # 新增：是否启用异步调用
+  enable_thinking: true
+
+# llm:
+#   enabled: true
+#   mode: "multi_agent"  # mode: "multi_agent" or "single_agent" 
+#   client: "openai"
+#   model: "gpt-4o-mini"
+#   temperature: 0.0  
+#   api_key: "None"
+#   base_url: null          # 新增：可选，用于自定义 API 端点
+#   max_workers: 3          # 新增：线程池工作线程数
+#   timeout: 15.0           # 新增：API 调用超时时间（秒）
+#   async_enabled: true     # 新增：是否启用异步调用

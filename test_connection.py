@@ -1,20 +1,19 @@
 """
-OpenAI API 连接测试脚本
+阿里云千问 API 连接测试脚本
 """
 
 import os
 import yaml
 
-def test_openai_connection():
-    """测试 OpenAI API 连接"""
+def test_qwen_connection():
+    """测试阿里云千问 API 连接"""
     
-    # 1. 设置代理（使用你的代理端口 7897）
-    proxy_url = "http://127.0.0.1:7897"
-    os.environ['HTTP_PROXY'] = proxy_url
-    os.environ['HTTPS_PROXY'] = proxy_url
-    os.environ['http_proxy'] = proxy_url
-    os.environ['https_proxy'] = proxy_url
-    print(f"🌐 使用代理: {proxy_url}")
+    # 1. 千问不需要代理（阿里云国内/国际服务）
+    # 清除可能存在的代理设置
+    for key in ['HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy']:
+        if key in os.environ:
+            del os.environ[key]
+    print("🌐 使用阿里云 DashScope API（无需代理）")
     
     # 2. 检查 openai 库是否安装
     try:
@@ -24,45 +23,48 @@ def test_openai_connection():
         print("❌ openai 库未安装，请运行: pip install openai")
         return False
     
-    # 3. 从配置文件读取 API Key
+    # 3. 从配置文件读取配置
     config_path = "configs/kuka_six_bricks.yaml"
     api_key = None
-    model = "gpt-4o-mini"
+    model = "qwen-plus"
+    base_url = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"  # 国际版默认
     
     if os.path.exists(config_path):
         with open(config_path, 'r') as f:
             cfg = yaml.safe_load(f)
             llm_cfg = cfg.get('llm', {})
             api_key = llm_cfg.get('api_key')
-            model = llm_cfg.get('model', 'gpt-4o-mini')
-            print(f"📄 从配置文件读取: model={model}")
-    
-    # 也检查环境变量
-    env_api_key = os.environ.get('OPENAI_API_KEY')
-    if env_api_key:
-        print("📄 检测到环境变量 OPENAI_API_KEY")
-        api_key = env_api_key
+            model = llm_cfg.get('model', 'qwen-plus')
+            base_url = llm_cfg.get('base_url', base_url)
+            print(f"📄 从配置文件读取:")
+            print(f"   model={model}")
+            print(f"   base_url={base_url}")
     
     if not api_key:
-        print("❌ 未找到 API Key，请在配置文件或环境变量中设置")
+        print("❌ 未找到 API Key，请在配置文件中设置")
         return False
     
-    # 隐藏显示 API Key（只显示前8位和后4位）
+    # 隐藏显示 API Key
     masked_key = api_key[:8] + "..." + api_key[-4:] if len(api_key) > 12 else "***"
     print(f"🔑 使用 API Key: {masked_key}")
     
     # 4. 测试连接
-    print("\n🔄 正在测试 API 连接...")
+    print("\n🔄 正在测试千问 API 连接...")
     
     try:
         from openai import OpenAI
         
-        client = OpenAI(api_key=api_key)
+        # 关键：必须设置 base_url！
+        client = OpenAI(
+            api_key=api_key,
+            base_url=base_url  # 指向阿里云端点
+        )
         
         # 发送一个简单的测试请求
         response = client.chat.completions.create(
             model=model,
             messages=[
+                {"role": "system", "content": "You are a helpful assistant."},
                 {"role": "user", "content": "Say 'Hello, connection test successful!' in one short sentence."}
             ],
             max_tokens=50,
@@ -73,26 +75,19 @@ def test_openai_connection():
         print(f"\n✅ API 连接成功!")
         print(f"📨 模型回复: {reply}")
         print(f"📊 使用的模型: {response.model}")
-        print(f"📊 Token 使用: prompt={response.usage.prompt_tokens}, completion={response.usage.completion_tokens}")
+        if response.usage:
+            print(f"📊 Token 使用: prompt={response.usage.prompt_tokens}, completion={response.usage.completion_tokens}")
         
         return True
         
     except openai.AuthenticationError as e:
         print(f"\n❌ API Key 认证失败: {e}")
-        print("   请检查 API Key 是否正确、是否过期")
-        return False
-        
-    except openai.RateLimitError as e:
-        print(f"\n❌ API 请求频率限制: {e}")
-        print("   可能是配额用尽或请求过于频繁")
+        print("   请检查 DashScope API Key 是否正确")
         return False
         
     except openai.APIConnectionError as e:
         print(f"\n❌ API 连接错误: {e}")
-        print("   可能的原因:")
-        print("   1. 代理端口 7897 是否正确？")
-        print("   2. 代理软件是否正常运行？")
-        print("   3. 尝试其他端口如 7890")
+        print("   请检查网络连接")
         return False
         
     except Exception as e:
@@ -102,17 +97,14 @@ def test_openai_connection():
 
 if __name__ == "__main__":
     print("="*50)
-    print("OpenAI API 连接测试")
+    print("阿里云千问 API 连接测试")
     print("="*50 + "\n")
     
-    success = test_openai_connection()
+    success = test_qwen_connection()
     
     print("\n" + "="*50)
     if success:
-        print("🎉 测试完成，API 连接正常!")
-        print("\n💡 在运行主程序时，请先设置环境变量:")
-        print("   export HTTP_PROXY=http://127.0.0.1:7897")
-        print("   export HTTPS_PROXY=http://127.0.0.1:7897")
+        print("🎉 测试完成，千问 API 连接正常!")
     else:
         print("❌ 测试失败，请根据上述提示解决问题")
     print("="*50)

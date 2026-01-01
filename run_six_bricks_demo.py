@@ -28,9 +28,23 @@ def main():
     print(f"[INIT] 砖块高度: {brick_height}")
 
     # ============ 初始化 SAM3 实时分割系统 ============
+    # sam3_segmenter = SAM3BrickSegmenter(
+    #     camera_position=(1.6, -1.2, 1.5),
+    #     camera_target=(0.4, 0.0, 0.2),
+    #     width=640,
+    #     height=480,
+    #     fov=78.0,
+    #     checkpoint_path="/home/ypf/sam3-main/checkpoint/sam3.pt",
+    #     text_prompt="red building block",
+    #     sam_resolution=1008,
+    #     confidence_threshold=0.4,
+    #     use_opengl=True,
+    #     brick_body_ids=brick_body_ids,
+    #     brick_height=brick_height,
+    # )
     sam3_segmenter = SAM3BrickSegmenter(
-        camera_position=(1.6, -1.2, 1.5),
-        camera_target=(0.4, 0.0, 0.2),
+        camera_position=(0.0, 0.0, 2.0),
+        camera_target=(0.0, 0.0, 0.2),
         width=640,
         height=480,
         fov=78.0,
@@ -41,7 +55,7 @@ def main():
         use_opengl=True,
         brick_body_ids=brick_body_ids,
         brick_height=brick_height,
-    )
+    )    
     sam3_segmenter.start()
 
     # ============ 初始化手眼相机 ============
@@ -443,210 +457,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-# import pybullet as p
-# import numpy as np
-# from env.pyb_env import BulletEnv
-# from modules.grasp_module import GraspModule
-# from control.gripper import GripperHelper
-# from modules.state_verifier import StateVerifier
-# from modules.motion_executor import MotionExecutor
-# from modules.qp_scheduler import QPTaskScheduler, TaskType
-# from modules.sam3_segment import SAM3BrickSegmenter, EyeInHandCamera, CameraDisplayManager
-
-
-# def main():
-#     # ============ 初始化环境 ============
-#     env = BulletEnv("configs/kuka_six_bricks.yaml", use_gui=True)
-#     rm = env.robot_model
-#     gripper = GripperHelper(rm)
-#     grasp = GraspModule(env)
-#     assist_cfg = env.cfg.get("assist_grasp", {})
-#     ground_z = env.get_ground_top()
-
-#     # ============ 获取砖块信息 ============
-#     brick_body_ids = env.brick_ids
-#     brick_height = env.cfg["brick"]["size_LWH"][2]
-#     total_slots = len(env.layout_targets)
-    
-#     print(f"[INIT] 砖块 Body IDs: {brick_body_ids}")
-#     print(f"[INIT] 砖块高度: {brick_height}")
-#     print(f"[INIT] 总槽位数: {total_slots}")
-
-#     # ============ 初始化 SAM3 实时分割系统 ============
-#     sam3_segmenter = SAM3BrickSegmenter(
-#         camera_position=(1.6, -1.2, 1.5),
-#         camera_target=(0.4, 0.0, 0.2),
-#         width=640,
-#         height=480,
-#         fov=78.0,
-#         checkpoint_path="/home/ypf/sam3-main/checkpoint/sam3.pt",
-#         text_prompt="red building block",
-#         sam_resolution=1008,
-#         confidence_threshold=0.4,
-#         use_opengl=True,
-#         brick_body_ids=brick_body_ids,
-#         brick_height=brick_height,
-#     )
-#     sam3_segmenter.start()
-
-#     # ============ 初始化手眼相机 ============
-#     eye_in_hand = EyeInHandCamera(
-#         robot_model=rm,
-#         width=640,
-#         height=480,
-#         fov=78.0,
-#         near=0.01,
-#         far=2.0,
-#         local_position=(0.0, -0.16, -0.1),
-#         local_orientation_rpy=(np.pi * 3/4, 0.0, 0.0),
-#         use_opengl=True,
-#     )
-#     eye_in_hand.start()
-
-#     # ============ 初始化统一显示管理器 ============
-#     display_manager = CameraDisplayManager(
-#         sam3_segmenter=sam3_segmenter,
-#         eye_in_hand=eye_in_hand,
-#         display_fps=15,
-#         combined_view=True
-#     )
-#     display_manager.start()
-
-#     print("\n[INIT] 执行初始 SAM3 分割，获取砖块位置...")
-#     sam3_segmenter.trigger_segment()
-#     import time
-#     time.sleep(1.5)
-#     print("[INIT] 初始分割完成，开始任务执行\n")
-
-#     # ============ 简化版调度器初始化 ============
-#     scheduler = QPTaskScheduler(
-#         env, 
-#         fill_threshold=0.05  # 5cm 以内视为已填充
-#     )
-
-#     # ============ 统计 ============
-#     success_count = 0
-#     failed_count = 0
-#     total_tasks = 0
-
-#     # ============ 主循环 ============
-#     while True:
-#         if not display_manager.is_running():
-#             print("[MAIN] Display manager stopped, exiting...")
-#             break
-        
-#         # 规划下一个任务
-#         task = scheduler.plan_next_task()
-        
-#         if task is None:
-#             print("[MAIN] 没有更多任务，退出")
-#             break
-        
-#         total_tasks += 1
-        
-#         brick_idx = task.brick_idx
-#         brick_id = task.brick_id
-#         goal_pose = task.to_goal_pose()
-#         level = task.level
-#         slot_idx = task.slot_idx
-        
-#         print(f"\n{'='*60}")
-#         print(f"[TASK #{total_tasks}] {task.task_type.value.upper()}")
-#         print(f"   Brick: idx={brick_idx}, id={brick_id}")
-#         print(f"   Source: ({task.source_pos[0]:.3f}, {task.source_pos[1]:.3f}, {task.source_pos[2]:.3f})")
-#         print(f"   Target: Level {level}, Slot {slot_idx}")
-#         print(f"   Target Pos: ({task.target_pos[0]:.3f}, {task.target_pos[1]:.3f}, {task.target_pos[2]:.3f})")
-#         print(f"   Reason: {task.reason}")
-        
-#         # 准备执行
-#         vf = StateVerifier(env, rm, gripper, brick_id)
-#         motion = MotionExecutor(
-#             env, rm, gripper, vf, 
-#             sam3_segmenter=sam3_segmenter,
-#             eye_in_hand_camera=eye_in_hand
-#         )
-        
-#         brick_state = env.get_brick_state(brick_id=brick_id)
-#         wps, aux = grasp.plan(brick_state, [*goal_pose], ground_z, brick_id=brick_id)
-        
-#         # 获取支撑面 (简化：Level 0 用地面，其他层用地面+下层砖块)
-#         if level == 0:
-#             support_ids = [env.ground_id]
-#         else:
-#             support_ids = [env.ground_id]
-#             # 添加下层已放置的砖块作为支撑
-#             for slot in scheduler.slots:
-#                 if slot.level == level - 1 and slot.filled_brick_id is not None:
-#                     support_ids.append(slot.filled_brick_id)
-        
-#         # 执行
-#         result = motion.execute_fsm(wps, aux, assist_cfg, brick_id, env.ground_id, support_ids=support_ids)
-        
-#         # 处理结果
-#         if isinstance(result, bool):
-#             result = {"success": result, "holding_brick": False}
-        
-#         ok = result["success"]
-        
-#         if ok:
-#             success_count += 1
-#             scheduler.mark_brick_placed(brick_id)
-#             print(f"✅ [SUCCESS] Level {level} Slot {slot_idx} 放置成功!")
-#         else:
-#             failed_count += 1
-#             print(f"❌ [FAILED] Level {level} Slot {slot_idx} 放置失败!")
-        
-#         # 进度
-#         scheduler.update_slot_status()
-#         filled = sum(1 for s in scheduler.slots if s.status.value == "filled")
-#         print(f"[Progress] 已填充: {filled}/{total_slots}, 成功: {success_count}, 失败: {failed_count}")
-        
-#         # 等待稳定
-#         settle_sec = env.cfg["timing"].get("brick_settle_sec", 2.0)
-#         env.step(int(settle_sec / env.dt))
-        
-#         # 重置
-#         print("Preparing for next task...")
-#         motion.reset_between_tasks()
-#         reset_sec = env.cfg["timing"].get("reset_wait_sec", 1.5)
-#         env.step(int(reset_sec / env.dt))
-
-#     # ============ 结束统计 ============
-#     scheduler.update_slot_status()
-#     filled = sum(1 for s in scheduler.slots if s.status.value == "filled")
-    
-#     print(f"\n{'='*60}")
-#     print(f"🎯 堆叠任务完成!")
-#     print(f"📊 最终统计:")
-#     print(f"   - 总槽位: {total_slots}")
-#     print(f"   - 已填充: {filled}")
-#     print(f"   - 执行任务数: {total_tasks}")
-#     print(f"   - 成功: {success_count}")
-#     print(f"   - 失败: {failed_count}")
-    
-#     print(f"\n[Final Slot Status]")
-#     print(scheduler.get_slot_status_string())
-    
-#     if filled == total_slots:
-#         print("🎉 完美! 所有槽位已填充!")
-#     elif filled >= total_slots * 0.8:
-#         print("👍 很好! 大部分槽位已填充!")
-#     else:
-#         print("🤔 需要优化参数和策略。")
-    
-#     print(f"{'='*60}")
-#     print("保持场景供检查...")
-    
-#     final_sec = env.cfg["timing"].get("final_wait_sec", 10.0)
-#     env.step(int(final_sec / env.dt))
-
-#     # 关闭
-#     display_manager.close()
-#     sam3_segmenter.close()
-#     eye_in_hand.close()
-#     env.disconnect()
-
-
-# if __name__ == "__main__":
-#     main()

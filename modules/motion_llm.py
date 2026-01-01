@@ -1,7 +1,7 @@
 import pybullet as p
 import numpy as np
 from typing import Any, Dict, Optional
-from modules.llm_planner import LLMPlanner, OpenAIChatClient
+from modules.llm_planner import LLMPlanner, OpenAIChatClient, AsyncOpenAIChatClient
 from math3d.transforms import align_topdown_to_brick
 
 class MotionLLMHandler:
@@ -31,12 +31,21 @@ class MotionLLMHandler:
         llm_mode = self.llm_cfg.get("mode", "multi_agent")
         
         if client_type.lower() == "openai":
-            client = OpenAIChatClient(
+            client = AsyncOpenAIChatClient(
                 model=self.llm_cfg.get("model", "gpt-4o-mini"),
                 temperature=self.llm_cfg.get("temperature", 0.0),
-                api_key=self.llm_cfg.get("api_key")
+                api_key=self.llm_cfg.get("api_key"),
+                base_url=self.llm_cfg.get("base_url"),
+                max_workers=self.llm_cfg.get("max_workers", 3),
+                default_timeout=self.llm_cfg.get("timeout", 30.0)
             )
-            self.llm_agent = LLMPlanner(client=client, enabled=True, mode=llm_mode)
+            self.llm_agent = LLMPlanner(
+                client=client, 
+                enabled=True, 
+                mode=llm_mode,
+                async_enabled=self.llm_cfg.get("async_enabled", True),
+                default_timeout=self.llm_cfg.get("timeout", 15.0)
+            )
             print(f"[LLM] Initialization complete - Mode: {llm_mode}")
         else:
             # print(f"[WARN] Unsupported LLM client: {client_type}")
@@ -255,3 +264,81 @@ class MotionLLMHandler:
         except Exception as e:
             print(f"[LLM_RELEASE] Error: {e}")
             return None
+
+    def plan_push_topple(self, brick_info: Dict[str, Any], aux: Dict[str, Any] = None) -> Dict[str, Any]:
+        """
+        Plan push action to topple a standing brick
+        
+        Args:
+            brick_info: {
+                "position": [x, y, z],        # brick centroid position
+                "measured_height": float,      # measured top surface height from depth
+                "mask_area": int,              # detected mask area in pixels
+            }
+            aux: optional auxiliary info (ground_z, etc.)
+        
+        Returns:
+            LLM planning result with push_plan or action_required=False
+        """
+        if self.llm_agent is None:
+            print("[PUSH_TOPPLE] LLM disabled, cannot plan push topple")
+            return {
+                "pose_analysis": {"detected_pose": "unknown"},
+                "action_required": False,
+                "push_plan": None,
+                "source": "llm_disabled"
+            }
+        
+        aux = aux or {}
+        L, W, H = self.env.cfg["brick"]["size_LWH"]
+        ground_z = aux.get("ground_z", self.env.get_ground_top() if hasattr(self.env, 'get_ground_top') else 0.0)
+        
+        # Get current TCP state
+        tcp_xyz, tcp_quat = self.rm.tcp_world_pose()
+        tcp_rpy = p.getEulerFromQuaternion(tcp_quat)
+        
+        # Get gripper info
+        tip_guess = float(self.gcfg.get("finger_tip_length", 0.012))
+        tip_measured = self.rm.estimate_tip_length_from_tcp(fallback=tip_guess)
+        
+        # Build context for LLM
+        context = {
+            "scene": {
+                "gravity": -9.81,
+                "time_step": self.env.dt,
+                "friction": {"ground": 0.5, "brick": 0.7}
+            },
+            "brick": {
+                "size_LWH": [L, W, H],
+                "pos": brick_info["position"],
+                "measured_height": brick_info.get("measured_height", brick_info["position"][2]),
+                "mask_area": brick_info.get("mask_area", 0),
+                "rpy": [0.0, 0.0, 0.0]  # unknown orientation
+            },
+            "gripper": {
+                "tip_length_guess": tip_guess,
+                "measured_tip_length": tip_measured,
+                "finger_depth": float(self.gcfg.get("finger_depth", 0.035)),
+            },
+            "constraints": {
+                "ground_z": ground_z,
+                "safety_clearance": float(self.ccfg.get("approach", 0.08)),
+            },
+            "now": {
+                "tcp_xyz": list(tcp_xyz),
+                "tcp_rpy": list(tcp_rpy)
+            }
+        }
+        
+        try:
+            result = self.llm_agent.plan_push_topple(context, 0, None)
+            return result
+        except Exception as e:
+            print(f"[PUSH_TOPPLE] LLM planning failed: {e}")
+            return {
+                "pose_analysis": {"detected_pose": "unknown"},
+                "action_required": False,
+                "push_plan": None,
+                "source": "llm_error",
+                "error": str(e)
+            }

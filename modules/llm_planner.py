@@ -2,6 +2,8 @@ import os
 import re
 import json
 import math
+import concurrent.futures
+import threading
 from typing import Any, Dict, Optional, Tuple
 
 from math3d.transforms import align_topdown_to_brick
@@ -13,6 +15,7 @@ from llm_prompt import (
     get_place_prompt, PLACE_REPLY_TEMPLATE,
     get_release_prompt, RELEASE_REPLY_TEMPLATE,
     get_single_agent_prompt, SINGLE_AGENT_REPLY_TEMPLATE,  
+    get_push_topple_prompt, PUSH_TOPPLE_REPLY_TEMPLATE
 )
 
 
@@ -63,6 +66,83 @@ class BaseLLMClient:
     def complete(self, system: str, user: str) -> str:
         raise NotImplementedError
 
+    def complete_async(self, system: str, user: str) -> concurrent.futures.Future:
+        raise NotImplementedError
+
+class AsyncOpenAIChatClient(BaseLLMClient):
+    def __init__(self, model: str = "gpt-4o-mini", temperature: float = 0.0,
+                 api_key: Optional[str] = None, base_url: Optional[str] = None,
+                 max_workers: int = 3, default_timeout: float = 30.0):
+        self.model = model
+        self.temperature = float(temperature)
+        self.api_key = api_key or os.getenv("OPENAI_API_KEY")
+        self.base_url = base_url or os.getenv("OPENAI_BASE_URL")
+        self.default_timeout = default_timeout
+        self._executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=max_workers,
+            thread_name_prefix="LLM_Worker"
+        )
+        self._client = None
+        self._client_lock = threading.Lock()
+    
+    def _get_client(self):
+        if self._client is None:
+            with self._client_lock:
+                if self._client is None:
+                    from openai import OpenAI
+                    kwargs = {}
+                    if self.api_key:
+                        kwargs["api_key"] = self.api_key
+                    if self.base_url:
+                        kwargs["base_url"] = self.base_url
+                    self._client = OpenAI(**kwargs)
+        return self._client
+    
+    def _do_complete(self, system: str, user: str) -> str:
+        try:
+            client = self._get_client()
+            resp = client.chat.completions.create(
+                model=self.model,
+                temperature=self.temperature,
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+            )
+            return resp.choices[0].message.content or ""
+        except Exception as e:
+            return f'{{"error":"{type(e).__name__}: {str(e)}"}}'
+        
+    def complete(self, system: str, user: str) -> str:
+        return self._do_complete(system, user)
+    
+    def complete_async(self, system: str, user: str) -> concurrent.futures.Future:
+        return self._executor.submit(self._do_complete, system, user)
+    
+    def complete_with_timeout(self, system: str, user: str, 
+                              timeout: Optional[float] = None) -> Tuple[str, bool]:
+        """
+        带超时的完成方法
+        
+        Returns:
+            (result, success): result 是返回内容，success 表示是否在超时内完成
+        """
+        timeout = timeout or self.default_timeout
+        future = self.complete_async(system, user)
+        try:
+            result = future.result(timeout=timeout)
+            return result, True
+        except concurrent.futures.TimeoutError:
+            print(f"[LLM] API call timed out after {timeout}s")
+            return '{"error": "timeout"}', False
+        except Exception as e:
+            print(f"[LLM] API call failed: {e}")
+            return f'{{"error": "{str(e)}"}}', False
+    
+    def shutdown(self):
+        """关闭线程池"""
+        self._executor.shutdown(wait=False)
+
 class OpenAIChatClient(BaseLLMClient):
     def __init__(self, model: str = "gpt-4o-mini", temperature: float = 0.0,
                  api_key: Optional[str] = None, base_url: Optional[str] = None):
@@ -107,15 +187,119 @@ class LLMPlanner:
     PLACE_REPLY_TEMPLATE = PLACE_REPLY_TEMPLATE
     RELEASE_REPLY_TEMPLATE = RELEASE_REPLY_TEMPLATE
     SINGLE_AGENT_REPLY_TEMPLATE = SINGLE_AGENT_REPLY_TEMPLATE
+    PUSH_TOPPLE_REPLY_TEMPLATE = PUSH_TOPPLE_REPLY_TEMPLATE
 
     def __init__(self, client: Optional[BaseLLMClient] = None, 
                  enabled: bool = True,
-                 mode: str = "multi_agent"):
+                 mode: str = "multi_agent",
+                 async_enabled: bool = True,           # 新增参数
+                 default_timeout: float = 15.0):       # 新增参数
         self.client = client
         self.enabled = bool(enabled and (client is not None))
         self.mode = mode  
         self._unified_plan_cache = None  
         self.plan_pre_place = self.plan_place
+        # ===== 新增以下代码 =====
+        self.async_enabled = async_enabled
+        self.default_timeout = default_timeout
+        # 预取缓存
+        self._prefetch_cache: Dict[str, concurrent.futures.Future] = {}
+        self._prefetch_lock = threading.Lock()
+
+    def prefetch_phase(self, phase: str, context: Dict[str, Any], 
+                       attempt_idx: int = 0, feedback: Optional[str] = None):
+        """
+        预取指定阶段的 LLM 结果（非阻塞）
+        """
+        if not self.enabled or not self.async_enabled:
+            return
+        
+        if not hasattr(self.client, 'complete_async'):
+            return
+        
+        prompt_func_map = {
+            "pre_grasp": self._prompt_pre_grasp,
+            "descend": self._prompt_descend,
+            "lift": self._prompt_lift,
+            "place": self._prompt_unified_place,
+            "release": self._prompt_release,
+            "close": self._prompt_close,
+        }
+        
+        if phase not in prompt_func_map:
+            return
+        
+        try:
+            sys_prompt, user_prompt = prompt_func_map[phase](context, attempt_idx, feedback)
+            future = self.client.complete_async(sys_prompt, user_prompt)
+            
+            cache_key = f"{phase}_{id(context)}"
+            with self._prefetch_lock:
+                self._prefetch_cache[cache_key] = future
+            
+            print(f"[LLM_PREFETCH] Started prefetch for phase: {phase}")
+        except Exception as e:
+            print(f"[LLM_PREFETCH] Failed to start prefetch for {phase}: {e}")
+    
+    def get_prefetched_result(self, phase: str, context: Dict[str, Any], 
+                               timeout: float = 5.0) -> Optional[str]:
+        """获取预取的结果（如果可用）"""
+        cache_key = f"{phase}_{id(context)}"
+        
+        with self._prefetch_lock:
+            future = self._prefetch_cache.pop(cache_key, None)
+        
+        if future is None:
+            return None
+        
+        try:
+            result = future.result(timeout=timeout)
+            print(f"[LLM_PREFETCH] Got prefetched result for phase: {phase}")
+            return result
+        except concurrent.futures.TimeoutError:
+            print(f"[LLM_PREFETCH] Prefetch timeout for phase: {phase}")
+            return None
+        except Exception as e:
+            print(f"[LLM_PREFETCH] Prefetch failed for {phase}: {e}")
+            return None
+    
+    def clear_prefetch_cache(self):
+        """清空预取缓存"""
+        with self._prefetch_lock:
+            for future in self._prefetch_cache.values():
+                future.cancel()
+            self._prefetch_cache.clear()
+    
+    def _complete_with_timeout(self, sys_prompt: str, user_prompt: str,
+                                phase: str = "", context: Any = None,
+                                timeout: Optional[float] = None) -> str:
+        """
+        带超时的 LLM 调用，优先使用预取结果
+        """
+        timeout = timeout or self.default_timeout
+        
+        # 1. 尝试获取预取结果
+        if context is not None and phase:
+            prefetched = self.get_prefetched_result(phase, context, timeout=0.1)
+            if prefetched is not None:
+                return prefetched
+        
+        # 2. 使用异步调用（带超时）
+        if self.async_enabled and hasattr(self.client, 'complete_with_timeout'):
+            result, success = self.client.complete_with_timeout(
+                sys_prompt, user_prompt, timeout=timeout
+            )
+            return result
+        elif self.async_enabled and hasattr(self.client, 'complete_async'):
+            future = self.client.complete_async(sys_prompt, user_prompt)
+            try:
+                return future.result(timeout=timeout)
+            except concurrent.futures.TimeoutError:
+                print(f"[LLM] {phase} API call timed out after {timeout}s")
+                return '{"error": "timeout"}'
+        else:
+            # 回退到同步调用
+            return self.client.complete(sys_prompt, user_prompt)
 
     # Prompt Construction
     def _prompt_pre_grasp(self, context: Dict[str, Any],
@@ -195,7 +379,7 @@ class LLMPlanner:
         }
 
         sys, usr = self._prompt_pre_grasp(context, attempt_idx, feedback)
-        raw = self.client.complete(sys, usr)
+        raw = self._complete_with_timeout(sys, usr, phase="pre_grasp", context=context)
         pose = self._postprocess_pose(raw, byaw, want_tcp_z, plan_pose)
         
         # Debug output
@@ -324,19 +508,8 @@ class LLMPlanner:
 
         # Call LLM
         sys, usr = self._prompt_descend(context, attempt_idx, feedback)
-        raw = self.client.complete(sys, usr)
+        raw = self._complete_with_timeout(sys, usr, phase="descend", context=context)
         result = self._postprocess_descend(raw, [bx, by, bz], want_tcp_z, required_gap, plan_pose)
-        
-        # Debug output
-        # print(f"[LLM_DESCEND] ===== LLM Descend Planning Results =====")
-        # print(f"[LLM_DESCEND] Brick position: ({bx:.6f}, {by:.6f}, {bz:.6f})")
-        # print(f"[LLM_DESCEND] Brick width W: {W:.6f}m")
-        # print(f"[LLM_DESCEND] Required gap: {required_gap:.6f}m")
-        # print(f"[LLM_DESCEND] Desired finger bottom: {desired_bottom:.6f}m")
-        # print(f"[LLM_DESCEND] Want TCP z: {want_tcp_z:.6f}m")
-        # print(f"[LLM_DESCEND] LLM output TCP: xyz=({result['pose']['xyz'][0]:.6f}, {result['pose']['xyz'][1]:.6f}, {result['pose']['xyz'][2]:.6f})")
-        # print(f"[LLM_DESCEND] LLM target gap: {result['target_gap']:.6f}m")
-        # print(f"[LLM_DESCEND] Source: {result.get('source', 'llm')}")
         
         return {"pose": result["pose"], "target_gap": result["target_gap"], "raw": raw, "source": result.get("source", "llm")}
 
@@ -452,7 +625,7 @@ class LLMPlanner:
 
         # Call LLM
         sys, usr = self._prompt_lift(context, attempt_idx, feedback)
-        raw = self.client.complete(sys, usr)
+        raw = self._complete_with_timeout(sys, usr, phase="lift", context=context)
         result = self._postprocess_lift(raw, [bx, by, bz], want_tcp_z, current_rpy, plan_pose)
         
         # Debug output
@@ -515,7 +688,7 @@ class LLMPlanner:
         try:
             # Call LLM for unified planning
             sys, usr = self._prompt_unified_place(context, attempt_idx, feedback)
-            raw = self.client.complete(sys, usr)
+            raw = self._complete_with_timeout(sys, usr, phase="place", context=context)
             result = self._postprocess_unified_place(raw, context)
             
             # Return to appropriate format based on calling phase
@@ -1189,7 +1362,7 @@ Your output will directly control gripper opening and retreat sequence for safe 
         max_opening = context["gripper"].get("max_opening", 0.200)
         target_gap = max(current_gap + 0.020, 0.105 * 1.2)
         sys, usr = self._prompt_release(context, attempt_idx, feedback)
-        raw = self.client.complete(sys, usr)
+        raw = self._complete_with_timeout(sys, usr, phase="release", context=context)
         result = self._postprocess_release(raw, current_gap, max_opening, target_gap)
         
         # Debug output
@@ -1294,27 +1467,168 @@ Your output will directly control gripper opening and retreat sequence for safe 
             }
         
         sys, usr = self._prompt_close(context, attempt_idx, feedback)
-        raw = self.client.complete(sys, usr)
+        raw = self._complete_with_timeout(sys, usr, phase="close", context=context)
         result = self._postprocess_close(raw, context)
-        
-        # Debug output
-        # print(f"[LLM_CLOSE] ===== LLM Close Planning Results =====")
-        # print(f"[LLM_CLOSE] Action type: {result['gripper_command']['action_type']}")
-        # print(f"[LLM_CLOSE] TCP adjustment: {result['tcp_adjustment']['enabled']}")
-        # if result['tcp_adjustment']['enabled']:
-        #     print(f"[LLM_CLOSE] Position offset: {result['tcp_adjustment']['position_offset']}")
-        # print(f"[LLM_CLOSE] Contact assist: {result['attachment_strategy']['use_contact_assist']}")
-        # print(f"[LLM_CLOSE] Contact threshold: {result['attachment_strategy']['contact_threshold']:.1f}N")
-        # print(f"[LLM_CLOSE] Source: {result.get('source', 'llm')}")
         
         return {
             **result,
             "raw": raw
         }
 
+    def _prompt_push_topple(self, context: Dict[str, Any], 
+                            attempt_idx: int = 0, 
+                            feedback: Optional[str] = None) -> Tuple[str, str]:
+        """Generate push topple phase prompt"""
+        return get_push_topple_prompt(context, attempt_idx, feedback or "")
+
+    def _postprocess_push_topple(self, raw_text: str, context: Dict[str, Any]) -> Dict[str, Any]:
+        """Post-process push topple LLM output"""
+        jd = _extract_json(raw_text) or {}
+        
+        # Extract brick info for fallback
+        brick_pos = context["brick"]["pos"]
+        brick_size = context["brick"]["size_LWH"]
+        L, W, H = brick_size
+        
+        # Check pose analysis
+        pose_analysis = jd.get("pose_analysis", {})
+        detected_pose = pose_analysis.get("detected_pose", "unknown")
+        action_required = jd.get("action_required", True)
+        
+        # If parsing failed completely
+        if not pose_analysis or detected_pose == "unknown":
+            print("[PUSH_TOPPLE] Failed to parse LLM response")
+            return {
+                "pose_analysis": {
+                    "detected_pose": "unknown",
+                    "measured_centroid_z": brick_pos[2],
+                    "confidence": 0.0,
+                    "reasoning": "Failed to parse LLM response"
+                },
+                "action_required": False,
+                "push_plan": None,
+                "source": "parse_failed"
+            }
+        
+        # If brick is already flat
+        if detected_pose == "flat" or not action_required:
+            return {
+                "pose_analysis": pose_analysis,
+                "action_required": False,
+                "push_plan": None,
+                "source": "llm"
+            }
+        
+        # Parse push plan
+        push_plan = jd.get("push_plan", {})
+        retreat_pose = jd.get("retreat_pose", {})
+        expected_result = jd.get("expected_result", {})
+        
+        # Validate approach pose
+        approach_pose = push_plan.get("approach_pose", {})
+        approach_xyz = approach_pose.get("xyz", [brick_pos[0], brick_pos[1], 0.2])
+        approach_rpy = approach_pose.get("rpy", [0.0, 0.0, 0.0])
+        
+        # Validate push start pose
+        push_start_pose = push_plan.get("push_start_pose", {})
+        push_start_xyz = push_start_pose.get("xyz", approach_xyz)
+        push_start_rpy = push_start_pose.get("rpy", approach_rpy)
+        
+        # Validate push parameters
+        push_direction = push_plan.get("push_direction", [1.0, 0.0, 0.0])
+        push_distance = push_plan.get("push_distance", 0.05)
+        push_contact_height = push_plan.get("push_contact_height", brick_pos[2] * 0.6)
+        push_speed = push_plan.get("push_speed", "slow")
+        
+        # Validate retreat pose
+        retreat_xyz = retreat_pose.get("xyz", [brick_pos[0], brick_pos[1], 0.2])
+        retreat_rpy = retreat_pose.get("rpy", [0.0, 0.0, 0.0])
+        
+        return {
+            "pose_analysis": {
+                "detected_pose": detected_pose,
+                "measured_centroid_z": float(pose_analysis.get("measured_centroid_z", brick_pos[2])),
+                "confidence": float(pose_analysis.get("confidence", 0.8)),
+                "reasoning": pose_analysis.get("reasoning", "")
+            },
+            "action_required": True,
+            "push_plan": {
+                "approach_pose": {
+                    "xyz": [float(x) for x in approach_xyz],
+                    "rpy": [float(r) for r in approach_rpy]
+                },
+                "push_start_pose": {
+                    "xyz": [float(x) for x in push_start_xyz],
+                    "rpy": [float(r) for r in push_start_rpy]
+                },
+                "push_direction": [float(d) for d in push_direction],
+                "push_distance": float(push_distance),
+                "push_contact_height": float(push_contact_height),
+                "push_speed": push_speed,
+                "description": push_plan.get("description", "")
+            },
+            "retreat_pose": {
+                "xyz": [float(x) for x in retreat_xyz],
+                "rpy": [float(r) for r in retreat_rpy]
+            },
+            "expected_result": {
+                "final_pose": expected_result.get("final_pose", "flat"),
+                "expected_height_after": float(expected_result.get("expected_height_after", H/2))
+            },
+            "source": "llm"
+        }
+
+    def plan_push_topple(self, context: Dict[str, Any],
+                         attempt_idx: int = 0,
+                         feedback: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Plan push action to topple a standing brick.
+        Same level as plan_pre_grasp, plan_descend, etc.
+        
+        Input: context with brick info including measured_height and mask_area
+        Output: {
+            "pose_analysis": {...},
+            "action_required": bool,
+            "push_plan": {...} or None,
+            "retreat_pose": {...},
+            "raw": <llm_text>,
+            "source": "llm|parse_failed|llm_disabled"
+        }
+        """
+        if not self.enabled or (self.client is None):
+            print("[PUSH_TOPPLE] LLM not enabled, cannot plan push topple")
+            return {
+                "pose_analysis": {"detected_pose": "unknown", "confidence": 0.0},
+                "action_required": False,
+                "push_plan": None,
+                "source": "llm_disabled"
+            }
+        
+        # Build prompt and call LLM
+        sys_prompt, user_prompt = self._prompt_push_topple(context, attempt_idx, feedback)
+        raw = self._complete_with_timeout(sys_prompt, user_prompt, phase="push_topple", context=context)
+        
+        # Post-process
+        result = self._postprocess_push_topple(raw, context)
+        result["raw"] = raw
+        
+        # Debug output
+        print(f"[LLM_PUSH_TOPPLE] ===== Push Topple Planning Results =====")
+        print(f"[LLM_PUSH_TOPPLE] Detected pose: {result['pose_analysis']['detected_pose']}")
+        print(f"[LLM_PUSH_TOPPLE] Action required: {result['action_required']}")
+        if result['action_required'] and result.get('push_plan'):
+            pp = result['push_plan']
+            print(f"[LLM_PUSH_TOPPLE] Approach position: ({pp['approach_pose']['xyz'][0]:.4f}, {pp['approach_pose']['xyz'][1]:.4f}, {pp['approach_pose']['xyz'][2]:.4f})")
+            print(f"[LLM_PUSH_TOPPLE] Push direction: ({pp['push_direction'][0]:.2f}, {pp['push_direction'][1]:.2f}, {pp['push_direction'][2]:.2f})")
+            print(f"[LLM_PUSH_TOPPLE] Push distance: {pp['push_distance']:.4f}m")
+        print(f"[LLM_PUSH_TOPPLE] Source: {result['source']}")
+        
+        return result
+    
     def reset_cache(self):
         """Clear unified planning cache (called when processing new brick)"""
         self._unified_plan_cache = None
+        self.clear_prefetch_cache() 
 
     def plan_unified(self, context: Dict[str, Any],
                     attempt_idx: int = 0,
@@ -1331,8 +1645,8 @@ Your output will directly control gripper opening and retreat sequence for safe 
         try:
             sys, usr = get_single_agent_prompt(context, attempt_idx, feedback)
             
-            raw = self.client.complete(sys, usr)
-            
+            # raw = self.client.complete(sys, usr)
+            raw = self._complete_with_timeout(sys, usr, phase="unified", context=context)
             result = _extract_json(raw) or {}
             
             required_phases = ["pre_grasp", "descend", "close", "lift", "place", "release"]

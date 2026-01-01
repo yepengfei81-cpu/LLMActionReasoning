@@ -819,30 +819,33 @@ class SAM3BrickSegmenter:
         """打印位置结果"""
         cam_pos, _ = camera.get_camera_pose()
         
-        print(f"\n{'='*80}")
+        print(f"\n{'='*90}")
         print(f"SAM3 砖块定位结果 | {time.strftime('%H:%M:%S')}")
         print(f"相机类型: {camera.__class__.__name__}")
         print(f"相机位置: ({cam_pos[0]:.2f}, {cam_pos[1]:.2f}, {cam_pos[2]:.2f})")
-        print(f"{'='*80}")
+        print(f"{'='*90}")
         
         print(f"\n[检测结果] ({len(results)} 个)")
-        print(f"{'序号':<4} {'X':>8} {'Y':>8} {'Z':>8} │ {'误差X':>8} {'误差Y':>8} {'误差Z':>8} │ {'总误差':>8}")
-        print("-" * 80)
+        print(f"{'序号':<4} {'X':>8} {'Y':>8} {'Z':>8} │ {'面积(像素)':>10} │ {'误差X':>8} {'误差Y':>8} {'误差Z':>8} │ {'总误差':>8}")
+        print("-" * 90)
         
         for i, m in enumerate(matched):
             det = m['detected']
             pos = det['position']
+            area = det.get('mask_area', 0)  # 获取掩码面积
             
             if m['ground_truth'] is not None:
                 err = m['error_xyz']
                 total_err = m['error']
                 print(f"{i+1:<4} {pos[0]:>8.4f} {pos[1]:>8.4f} {pos[2]:>8.4f} │ "
+                      f"{area:>10} │ "
                       f"{err[0]:>+8.4f} {err[1]:>+8.4f} {err[2]:>+8.4f} │ {total_err:>8.4f}")
             else:
                 print(f"{i+1:<4} {pos[0]:>8.4f} {pos[1]:>8.4f} {pos[2]:>8.4f} │ "
+                      f"{area:>10} │ "
                       f"{'N/A':>8} {'N/A':>8} {'N/A':>8} │ {'N/A':>8}")
         
-        print(f"{'='*80}\n")
+        print(f"{'='*90}\n")
     
     def trigger_segment(self):
         """触发异步分割"""
