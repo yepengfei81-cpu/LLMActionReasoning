@@ -330,13 +330,19 @@ class EyeInHandCamera(CameraBase):
             self._cached_results = results or []
             self._last_segment_time = time.time()
     
-    def _draw_segmentation(self, frame: np.ndarray, masks: Optional[np.ndarray]) -> np.ndarray:
-        """绘制分割结果"""
+    def _draw_segmentation(self, frame: np.ndarray, masks: Optional[np.ndarray],
+                           results: Optional[List[Dict]] = None) -> np.ndarray:
+        """绘制分割结果，包含朝向箭头"""
         if masks is None or len(masks) == 0:
             return frame
         
         result = frame.copy()
         height, width = frame.shape[:2]
+        
+        # 如果没有传入 results，使用缓存的
+        if results is None:
+            with self._lock:
+                results = self._cached_results
         
         for i, mask in enumerate(masks):
             if len(mask.shape) == 3:
@@ -358,11 +364,37 @@ class EyeInHandCamera(CameraBase):
                                            cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             cv2.drawContours(result, contours, -1, color, 2)
             
+            # 获取该砖块的结果信息
+            brick_result = results[i] if results and i < len(results) else None
+            
             ys, xs = np.where(mask_bool)
             if len(xs) > 0:
                 cx, cy = int(np.mean(xs)), int(np.mean(ys))
                 cv2.circle(result, (cx, cy), 5, color, -1)
                 cv2.circle(result, (cx, cy), 8, (255, 255, 255), 2)
+                
+                # 绘制朝向箭头
+                if brick_result and 'rect_info' in brick_result and brick_result['rect_info'] is not None:
+                    rect_info = brick_result['rect_info']
+                    estimated_yaw = brick_result.get('estimated_yaw', 0.0)
+                    
+                    # 绘制最小外接矩形
+                    box_points = rect_info['box_points']
+                    box_points = np.int32(box_points)
+                    cv2.drawContours(result, [box_points], 0, (255, 255, 255), 1)
+                    
+                    # 绘制朝向箭头
+                    arrow_length = min(rect_info['long_edge'] / 2, 40)
+                    img_angle = -estimated_yaw
+                    
+                    end_x = int(cx + arrow_length * np.cos(img_angle))
+                    end_y = int(cy + arrow_length * np.sin(img_angle))
+                    
+                    cv2.arrowedLine(result, (cx, cy), (end_x, end_y), (0, 255, 255), 2, tipLength=0.3)
+                    
+                    end_x2 = int(cx - arrow_length * 0.5 * np.cos(img_angle))
+                    end_y2 = int(cy - arrow_length * 0.5 * np.sin(img_angle))
+                    cv2.line(result, (cx, cy), (end_x2, end_y2), (0, 255, 255), 2)
         
         return result
     
@@ -379,18 +411,15 @@ class EyeInHandCamera(CameraBase):
             )
             
             if show_segmentation:
-                display_frame = self._draw_segmentation(self._cached_frame, self._cached_masks)
+                # 传入 results 以便绘制朝向
+                display_frame = self._draw_segmentation(
+                    self._cached_frame, 
+                    self._cached_masks,
+                    self._cached_results
+                )
                 num_detected = len(self._cached_masks) if self._cached_masks is not None else 0
                 cv2.putText(display_frame, f"Eye-in-Hand SAM3: {num_detected} detected", (10, 25),
                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-                
-                if self._cached_results:
-                    for i, result in enumerate(self._cached_results[:3]):
-                        pos = result['position']
-                        y_offset = 50 + i * 20
-                        cv2.putText(display_frame, 
-                                   f"#{i+1}: ({pos[0]:.3f}, {pos[1]:.3f}, {pos[2]:.3f})", 
-                                   (10, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
             else:
                 display_frame = frame
                 cv2.putText(display_frame, "Eye-in-Hand (TCP)", (10, 25),
@@ -513,7 +542,7 @@ class BrickPositionCalculator:
                           depth: np.ndarray,
                           adjust_to_centroid: bool = True) -> List[Dict]:
         """
-        从分割掩码计算砖块 3D 位置
+        从分割掩码计算砖块 3D 位置和朝向
         
         Args:
             camera: 相机实例（提供内参外参）
@@ -522,7 +551,7 @@ class BrickPositionCalculator:
             adjust_to_centroid: 是否将表面点调整到质心
         
         Returns:
-            positions: 砖块位置列表
+            positions: 砖块位置列表（包含估算的朝向）
         """
         results = []
         height, width = depth.shape
@@ -543,6 +572,9 @@ class BrickPositionCalculator:
             # 计算掩码中心
             ys, xs = np.where(mask_bool)
             cx, cy = np.mean(xs), np.mean(ys)
+            
+            # ========== 新增：估算砖块朝向 ==========
+            estimated_yaw, rect_info = self._estimate_orientation_from_mask(mask_bool)
             
             # 计算深度（使用中心区域的中值）
             kernel = np.ones((5, 5), np.uint8)
@@ -569,12 +601,90 @@ class BrickPositionCalculator:
                 'pixel_center': (cx, cy),
                 'depth': avg_depth,
                 'distance': np.linalg.norm(centroid_pos - cam_pos),
-                'mask_area': np.sum(mask_bool)
+                'mask_area': np.sum(mask_bool),
+                'estimated_yaw': estimated_yaw,  # 新增：估算的朝向角度（弧度）
+                'rect_info': rect_info  # 新增：用于可视化的矩形信息
             })
         
         # 按距离排序
         results.sort(key=lambda x: x['distance'])
         return results
+    
+    def _estimate_orientation_from_mask(self, mask_bool: np.ndarray) -> Tuple[float, Optional[Dict]]:
+        """
+        从掩码形状估算砖块朝向（yaw 角度）
+        
+        使用最小外接矩形的方向来估算砖块的长边朝向
+        
+        Args:
+            mask_bool: 二值掩码 (H, W)
+        
+        Returns:
+            estimated_yaw: 估算的 yaw 角度（弧度），表示砖块长边方向
+            rect_info: 矩形信息字典，用于可视化
+        """
+        # 找到轮廓
+        contours, _ = cv2.findContours(
+            (mask_bool * 255).astype(np.uint8),
+            cv2.RETR_EXTERNAL, 
+            cv2.CHAIN_APPROX_SIMPLE
+        )
+        
+        if not contours:
+            return 0.0, None
+        
+        # 取最大轮廓
+        largest_contour = max(contours, key=cv2.contourArea)
+        
+        if len(largest_contour) < 5:
+            return 0.0, None
+        
+        # 计算最小外接矩形
+        # 返回: ((center_x, center_y), (width, height), angle)
+        rect = cv2.minAreaRect(largest_contour)
+        (rect_cx, rect_cy), (rect_w, rect_h), angle = rect
+        
+        # 确定长边方向：如果 rect_w > rect_h，则长边沿着 angle 方向
+        # 否则长边沿着 angle + 90 方向
+        if rect_w < rect_h:
+            # height 是长边，需要调整角度
+            long_edge_angle = angle + 90
+            short_edge = rect_w
+            long_edge = rect_h
+        else:
+            # width 是长边
+            long_edge_angle = angle
+            short_edge = rect_h
+            long_edge = rect_w
+        
+        # 将角度转换为弧度
+        # OpenCV 角度是相对于水平方向（图像 X 轴）的顺时针角度
+        # 我们需要转换为世界坐标系的 yaw（相对于 X 轴的逆时针角度）
+        
+        # 对于俯视相机：
+        # - 图像 X 轴对应世界 X 轴
+        # - 图像 Y 轴对应世界 -Y 轴（因为图像 Y 向下）
+        # 所以需要取负
+        yaw_rad = -np.radians(long_edge_angle)
+        
+        # 归一化到 [-π/2, π/2]（因为砖块有对称性，180度是等价的）
+        while yaw_rad > np.pi / 2:
+            yaw_rad -= np.pi
+        while yaw_rad < -np.pi / 2:
+            yaw_rad += np.pi
+        
+        # 保存矩形信息用于可视化
+        rect_info = {
+            'center': (rect_cx, rect_cy),
+            'size': (rect_w, rect_h),
+            'angle': angle,
+            'long_edge': long_edge,
+            'short_edge': short_edge,
+            'long_edge_angle_deg': long_edge_angle,
+            'box_points': cv2.boxPoints(rect)  # 四个角点
+        }
+        
+        return float(yaw_rad), rect_info
     
     def match_with_ground_truth(self,
                                  detected_positions: List[Dict],
@@ -711,6 +821,85 @@ class SAM3BrickSegmenter:
         """捕获图像"""
         return self.camera.capture_frame()
     
+    def _draw_segmentation(self, frame: np.ndarray, masks: Optional[np.ndarray], 
+                           results: Optional[List[Dict]] = None) -> np.ndarray:
+        """绘制分割结果，包含朝向箭头"""
+        if masks is None or len(masks) == 0:
+            return frame
+        
+        result = frame.copy()
+        height, width = frame.shape[:2]
+        
+        # 如果没有传入 results，使用缓存的
+        if results is None:
+            with self._lock:
+                results = self._cached_results
+        
+        for i, mask in enumerate(masks):
+            if len(mask.shape) == 3:
+                mask = mask[0]
+            if mask.shape != (height, width):
+                mask = cv2.resize(mask.astype(np.float32), (width, height),
+                                 interpolation=cv2.INTER_NEAREST)
+            
+            mask_bool = mask > 0.5
+            if not np.any(mask_bool):
+                continue
+            
+            color = COLORS[i % len(COLORS)]
+            
+            # 绘制半透明掩码
+            overlay = result.copy()
+            overlay[mask_bool] = color
+            result = cv2.addWeighted(result, 0.7, overlay, 0.3, 0)
+            
+            # 绘制轮廓
+            contours, _ = cv2.findContours((mask_bool * 255).astype(np.uint8),
+                                           cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            cv2.drawContours(result, contours, -1, color, 2)
+            
+            # 获取该砖块的结果信息
+            brick_result = results[i] if results and i < len(results) else None
+            
+            # 计算掩码中心
+            ys, xs = np.where(mask_bool)
+            if len(xs) > 0:
+                cx, cy = int(np.mean(xs)), int(np.mean(ys))
+                
+                # 绘制中心点
+                cv2.circle(result, (cx, cy), 5, color, -1)
+                cv2.circle(result, (cx, cy), 8, (255, 255, 255), 2)
+                
+                # ========== 新增：绘制朝向箭头 ==========
+                if brick_result and 'rect_info' in brick_result and brick_result['rect_info'] is not None:
+                    rect_info = brick_result['rect_info']
+                    estimated_yaw = brick_result.get('estimated_yaw', 0.0)
+                    
+                    # 绘制最小外接矩形
+                    box_points = rect_info['box_points']
+                    box_points = np.int32(box_points)
+                    cv2.drawContours(result, [box_points], 0, (255, 255, 255), 1)
+                    
+                    # 绘制朝向箭头（长边方向）
+                    # 注意：图像坐标系 Y 向下，所以 sin 需要取负
+                    arrow_length = min(rect_info['long_edge'] / 2, 40)  # 箭头长度
+                    
+                    # 从中心点沿长边方向画箭头
+                    # yaw_rad 是世界坐标系的角度，需要转回图像坐标系
+                    img_angle = -estimated_yaw  # 转回图像坐标系
+                    
+                    end_x = int(cx + arrow_length * np.cos(img_angle))
+                    end_y = int(cy + arrow_length * np.sin(img_angle))
+                    
+                    # 绘制双向箭头表示长边方向
+                    cv2.arrowedLine(result, (cx, cy), (end_x, end_y), (0, 255, 255), 2, tipLength=0.3)
+                    
+                    # 反方向也画一个短线
+                    end_x2 = int(cx - arrow_length * 0.5 * np.cos(img_angle))
+                    end_y2 = int(cy - arrow_length * 0.5 * np.sin(img_angle))
+                    cv2.line(result, (cx, cy), (end_x2, end_y2), (0, 255, 255), 2)
+        return result
+    
     def get_display_frame(self) -> np.ndarray:
         """获取显示帧"""
         frame, _ = self.capture_frame()
@@ -722,44 +911,21 @@ class SAM3BrickSegmenter:
             )
             
             if show_segmentation:
-                display_frame = self._draw_segmentation(self._cached_frame, self._cached_masks)
+                # 传入 results 以便绘制朝向
+                display_frame = self._draw_segmentation(
+                    self._cached_frame, 
+                    self._cached_masks, 
+                    self._cached_results
+                )
                 num_detected = len(self._cached_masks) if self._cached_masks is not None else 0
-                cv2.putText(display_frame, f"SAM3: {num_detected} bricks", (10, 30),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+                cv2.putText(display_frame, f"SAM3: {num_detected} bricks (yellow arrow = long edge)", (10, 30),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
             else:
                 display_frame = frame
                 cv2.putText(display_frame, "Live View (press 's' to segment)", (10, 30),
                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 2)
         
         return display_frame
-    
-    def _draw_segmentation(self, frame: np.ndarray, masks: Optional[np.ndarray]) -> np.ndarray:
-        """绘制分割结果"""
-        if masks is None or len(masks) == 0:
-            return frame
-        
-        result = frame.copy()
-        for i, mask in enumerate(masks):
-            if len(mask.shape) == 3:
-                mask = mask[0]
-            if mask.shape != (self.height, self.width):
-                mask = cv2.resize(mask.astype(np.float32), (self.width, self.height),
-                                 interpolation=cv2.INTER_NEAREST)
-            
-            mask_bool = mask > 0.5
-            if not np.any(mask_bool):
-                continue
-            
-            color = COLORS[i % len(COLORS)]
-            overlay = result.copy()
-            overlay[mask_bool] = color
-            result = cv2.addWeighted(result, 0.7, overlay, 0.3, 0)
-            
-            contours, _ = cv2.findContours((mask_bool * 255).astype(np.uint8),
-                                           cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            cv2.drawContours(result, contours, -1, color, 2)
-        
-        return result
     
     def segment_and_localize(self,
                               camera: Optional[CameraBase] = None,
@@ -816,36 +982,37 @@ class SAM3BrickSegmenter:
         return results
     
     def _print_results(self, results: List[Dict], matched: List[Dict], camera: CameraBase):
-        """打印位置结果"""
+        """打印位置结果，包含朝向信息"""
         cam_pos, _ = camera.get_camera_pose()
         
-        print(f"\n{'='*90}")
+        print(f"\n{'='*100}")
         print(f"SAM3 砖块定位结果 | {time.strftime('%H:%M:%S')}")
         print(f"相机类型: {camera.__class__.__name__}")
         print(f"相机位置: ({cam_pos[0]:.2f}, {cam_pos[1]:.2f}, {cam_pos[2]:.2f})")
-        print(f"{'='*90}")
+        print(f"{'='*100}")
         
         print(f"\n[检测结果] ({len(results)} 个)")
-        print(f"{'序号':<4} {'X':>8} {'Y':>8} {'Z':>8} │ {'面积(像素)':>10} │ {'误差X':>8} {'误差Y':>8} {'误差Z':>8} │ {'总误差':>8}")
-        print("-" * 90)
+        print(f"{'序号':<4} {'X':>8} {'Y':>8} {'Z':>8} │ {'面积':>6} {'Yaw°':>7} │ {'误差X':>8} {'误差Y':>8} {'误差Z':>8} │ {'总误差':>8}")
+        print("-" * 100)
         
         for i, m in enumerate(matched):
             det = m['detected']
             pos = det['position']
-            area = det.get('mask_area', 0)  # 获取掩码面积
+            area = det.get('mask_area', 0)
+            yaw_deg = np.degrees(det.get('estimated_yaw', 0.0))
             
             if m['ground_truth'] is not None:
                 err = m['error_xyz']
                 total_err = m['error']
                 print(f"{i+1:<4} {pos[0]:>8.4f} {pos[1]:>8.4f} {pos[2]:>8.4f} │ "
-                      f"{area:>10} │ "
+                      f"{area:>6} {yaw_deg:>+7.1f} │ "
                       f"{err[0]:>+8.4f} {err[1]:>+8.4f} {err[2]:>+8.4f} │ {total_err:>8.4f}")
             else:
                 print(f"{i+1:<4} {pos[0]:>8.4f} {pos[1]:>8.4f} {pos[2]:>8.4f} │ "
-                      f"{area:>10} │ "
+                      f"{area:>6} {yaw_deg:>+7.1f} │ "
                       f"{'N/A':>8} {'N/A':>8} {'N/A':>8} │ {'N/A':>8}")
         
-        print(f"{'='*90}\n")
+        print(f"{'='*100}\n")
     
     def trigger_segment(self):
         """触发异步分割"""

@@ -4,7 +4,7 @@ import time
 from control.controllers import move_tcp_cartesian
 from math3d.transforms import align_topdown_to_brick
 import math
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, List
 from modules.motion_visualizer import MotionVisualizer
 from modules.motion_llm import MotionLLMHandler
 
@@ -534,9 +534,307 @@ class MotionExecutor:
         if self.sam3_segmenter is not None:
             self.sam3_segmenter.trigger_segment()
 
+    def analyze_brick_poses_from_sam3_cache(self) -> List[Dict[str, Any]]:
+        """
+        从 SAM3 缓存结果分析所有砖块姿态
+        
+        Returns:
+            List of dicts with brick pose analysis:
+            - brick_id: int (matched PyBullet body ID, or -1 if not matched)
+            - position: [x, y, z]
+            - mask_area: int (pixels)
+            - measured_height: float (estimated from position z)
+            - detected_pose: str ("flat", "side", "upright", "unknown")
+            - needs_correction: bool
+            - estimated_yaw: float (从 SAM3 掩码估算的朝向角度，弧度)
+        """
+        if self.sam3_segmenter is None:
+            return []
+        
+        # 获取砖块尺寸
+        brick_size = self.env.cfg.get("brick", {}).get("size_LWH", [0.2, 0.1, 0.06])
+        L, W, H = brick_size
+        
+        # 计算各姿态的期望高度
+        flat_height = H / 2  # 平放时质心高度
+        side_height = W / 2  # 侧放时质心高度
+        upright_height = L / 2  # 立放时质心高度
+        
+        # 获取缓存的检测结果
+        with self.sam3_segmenter._lock:
+            cached_results = list(self.sam3_segmenter._cached_results)
+        
+        if not cached_results:
+            return []
+        
+        # 匹配 PyBullet 砖块 ID
+        brick_body_ids = self.sam3_segmenter.brick_body_ids or []
+        matched = self.sam3_segmenter.position_calculator.match_with_ground_truth(
+            cached_results, brick_body_ids, max_distance=0.1
+        )
+        
+        analysis_results = []
+        height_tolerance = 0.02  # 2cm 容差
+        
+        for m in matched:
+            det = m['detected']
+            gt = m['ground_truth']
+            
+            pos = det['position']
+            mask_area = det.get('mask_area', 0)
+            measured_height = pos[2]  # 质心 Z 坐标
+            
+            # ========== 新增：获取估算的 yaw 角度 ==========
+            estimated_yaw = det.get('estimated_yaw', 0.0)
+            
+            # 根据高度判断姿态
+            if abs(measured_height - flat_height) < height_tolerance:
+                detected_pose = "flat"
+                needs_correction = False
+            elif abs(measured_height - side_height) < height_tolerance:
+                detected_pose = "side"
+                needs_correction = True
+            elif abs(measured_height - upright_height) < height_tolerance:
+                detected_pose = "upright"
+                needs_correction = True
+            else:
+                detected_pose = "unknown"
+                needs_correction = measured_height > flat_height + height_tolerance
+            
+            analysis_results.append({
+                'brick_id': gt['id'] if gt else -1,
+                'position': list(pos),
+                'mask_area': mask_area,
+                'measured_height': measured_height,
+                'detected_pose': detected_pose,
+                'needs_correction': needs_correction,
+                'expected_flat_height': flat_height,
+                'estimated_yaw': estimated_yaw  # 新增：SAM3 估算的朝向角度
+            })
+        
+        return analysis_results
 
+    def execute_push_topple_for_brick(self, brick_analysis: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        对单个砖块执行推倒修复
+        
+        Args:
+            brick_analysis: 来自 analyze_brick_poses_from_sam3_cache 的分析结果
+        
+        Returns:
+            执行结果 dict
+        """
+        self.viz.banner(f"[phase] push_topple (brick_id={brick_analysis.get('brick_id', 'unknown')})")
+        
+        brick_id = brick_analysis.get('brick_id', -1)
+        if brick_id == -1:
+            print(f"[PUSH_TOPPLE] Cannot execute: no matched brick_id")
+            return {"success": False, "action_taken": False, "error": "No matched brick_id"}
+        
+        # 构建给 LLM 的 brick_info
+        brick_size = self.env.cfg.get("brick", {}).get("size_LWH", [0.2, 0.1, 0.06])
+        ground_z = self.env.get_ground_top()
+        
+        # ========== 新增：获取估算的 yaw 角度 ==========
+        estimated_yaw = brick_analysis.get('estimated_yaw', 0.0)
+        
+        brick_info = {
+            "pos": brick_analysis['position'],
+            "size_LWH": brick_size,
+            "measured_height": brick_analysis['measured_height'],
+            "mask_area": brick_analysis['mask_area'],
+            "brick_id": brick_id,
+            "estimated_yaw": estimated_yaw  # 新增：传递给 LLM
+        }
+        
+        print(f"[PUSH_TOPPLE] Brick yaw from SAM3: {np.degrees(estimated_yaw):.1f}°")
+        
+        # 调用 LLM 规划
+        try:
+            plan_result = self.llm_handler.plan_push_topple(brick_info, {"ground_z": ground_z})
+        except Exception as e:
+            print(f"[PUSH_TOPPLE] LLM planning failed: {e}")
+            return {"success": False, "action_taken": False, "error": str(e)}
+        
+        detected_pose = plan_result.get("pose_analysis", {}).get("detected_pose", "unknown")
+        action_required = plan_result.get("action_required", False)
+        
+        print(f"[PUSH_TOPPLE] LLM detected pose: {detected_pose}, action required: {action_required}")
+        
+        if not action_required:
+            return {"success": True, "action_taken": False, "detected_pose": detected_pose}
+        
+        # 提取推动计划
+        push_plan = plan_result.get("push_plan")
+        if push_plan is None:
+            return {"success": False, "action_taken": False, "error": "No push plan"}
+        
+        # 执行推动序列
+        try:
+            # Helper function to ensure gripper points down
+            def ensure_gripper_down(rpy):
+                """Ensure roll is π (gripper pointing down)"""
+                if rpy is None:
+                    return [np.pi, 0.0, 0.0]
+                # Force roll to be π for top-down orientation
+                return [np.pi, rpy[1] if len(rpy) > 1 else 0.0, rpy[2] if len(rpy) > 2 else 0.0]
+            
+            # 1. 移动到接近位置
+            approach_xyz = push_plan["approach_pose"]["xyz"]
+            approach_rpy = ensure_gripper_down(push_plan["approach_pose"].get("rpy", [0, 0, 0]))
+            print(f"[PUSH_TOPPLE] Approaching: {approach_xyz}, rpy: {approach_rpy}")
+            self._move_tcp(dict(xyz=approach_xyz, rpy=approach_rpy))
+            self.viz.snap("push_topple@approach")
+            
+            # 2. 关闭夹爪（用作推杆）
+            self.gripper.close()
+            self._wait(self.timing.get("gripper_close_wait_sec", 0.15))
+            
+            # 3. 下降到推动起始位置
+            push_start_xyz = push_plan["push_start_pose"]["xyz"]
+            push_start_rpy = ensure_gripper_down(push_plan["push_start_pose"].get("rpy", [0, 0, 0]))
+            print(f"[PUSH_TOPPLE] Descending to push start: {push_start_xyz}, rpy: {push_start_rpy}")
+            self._move_tcp(dict(xyz=push_start_xyz, rpy=push_start_rpy))
+            self.viz.snap("push_topple@push_start")
+            
+            # 4. 执行推动
+            push_direction = np.array(push_plan["push_direction"])
+            push_distance = push_plan["push_distance"]
+            
+            # 归一化方向
+            dir_norm = np.linalg.norm(push_direction[:2])
+            if dir_norm > 0.001:
+                push_direction[:2] = push_direction[:2] / dir_norm
+            
+            push_end_xyz = [
+                push_start_xyz[0] + push_direction[0] * push_distance,
+                push_start_xyz[1] + push_direction[1] * push_distance,
+                push_start_xyz[2]
+            ]
+            
+            print(f"[PUSH_TOPPLE] Pushing: dir={push_direction[:2]}, dist={push_distance:.4f}m")
+            
+            # 慢速推动
+            original_move_sec = self.move_sec
+            self.move_sec = max(self.move_sec * 1.5, 2.0)
+            self._move_tcp(dict(xyz=push_end_xyz, rpy=push_start_rpy))
+            self.move_sec = original_move_sec
+            self.viz.snap("push_topple@push_end")
+            
+            # 5. 修改：直接在推动结束位置原地升高，而不是回到接近位置
+            # 获取 home 位置的高度作为安全高度
+            home_xyz = self.env.cfg.get("home_pose_xyz", [0.55, 0.0, 0.55])
+            safe_height = home_xyz[2]  # 使用 home 位置的 z 高度
+            
+            # 在当前 XY 位置直接升高
+            retreat_xyz = [push_end_xyz[0], push_end_xyz[1], safe_height]
+            retreat_rpy = ensure_gripper_down([0, 0, 0])
+            print(f"[PUSH_TOPPLE] Lifting up at current position: {retreat_xyz}, rpy: {retreat_rpy}")
+            self._move_tcp(dict(xyz=retreat_xyz, rpy=retreat_rpy))
+            self.viz.snap("push_topple@lift_up")
+            
+            # 6. 回到 home 位置
+            print(f"[PUSH_TOPPLE] Returning to home: {home_xyz}")
+            self._move_tcp(dict(xyz=home_xyz, rpy=retreat_rpy))
+            self.viz.snap("push_topple@home")
+            
+            # 7. 打开夹爪
+            self.gripper.open()
+            self._wait(self.timing.get("gripper_open_wait_sec", 0.15))
+            
+            # 8. 等待砖块稳定
+            self._wait(self.timing.get("brick_settle_sec", 1.0))
+            
+            return {"success": True, "action_taken": True, "detected_pose": detected_pose}
+            
+        except Exception as e:
+            print(f"[PUSH_TOPPLE] Execution error: {e}")
+            try:
+                self.gripper.open()
+                home_xyz = self.env.cfg.get("home_pose_xyz", [0.55, 0.0, 0.55])
+                self._move_tcp(dict(xyz=home_xyz, rpy=[np.pi, 0.0, 0.0]))
+            except:
+                pass
+            return {"success": False, "action_taken": True, "error": str(e)}
 
-
+    def check_and_correct_all_brick_poses(self, max_corrections: int = 3) -> Dict[str, Any]:
+        """
+        检测并修复所有异常姿态的砖块
+        在 reset_between_tasks 之后调用（SAM3 已触发）
+        
+        Args:
+            max_corrections: 最大修复次数（防止无限循环）
+        
+        Returns:
+            {
+                "corrections_made": int,
+                "all_flat": bool,
+                "details": List[Dict]
+            }
+        """
+        if self.sam3_segmenter is None:
+            return {"corrections_made": 0, "all_flat": True, "details": []}
+        
+        corrections_made = 0
+        details = []
+        
+        for attempt in range(max_corrections):
+            # 等待 SAM3 分割完成
+            self._wait(0.8)
+            
+            # 分析所有砖块姿态
+            analysis = self.analyze_brick_poses_from_sam3_cache()
+            
+            if not analysis:
+                print(f"[POSE_CHECK] No bricks detected in SAM3 cache")
+                break
+            
+            # 找出需要修复的砖块
+            bricks_to_fix = [a for a in analysis if a['needs_correction']]
+            
+            if not bricks_to_fix:
+                print(f"[POSE_CHECK] ✓ All {len(analysis)} bricks are flat")
+                return {
+                    "corrections_made": corrections_made,
+                    "all_flat": True,
+                    "details": details
+                }
+            
+            print(f"[POSE_CHECK] Found {len(bricks_to_fix)} bricks need correction (attempt {attempt+1}/{max_corrections})")
+            
+            # 修复第一个异常砖块（避免一次修复太多导致混乱）
+            brick_to_fix = bricks_to_fix[0]
+            print(f"[POSE_CHECK] Correcting brick_id={brick_to_fix['brick_id']}, "
+                  f"pose={brick_to_fix['detected_pose']}, height={brick_to_fix['measured_height']:.4f}m")
+            
+            result = self.execute_push_topple_for_brick(brick_to_fix)
+            details.append({
+                "brick_id": brick_to_fix['brick_id'],
+                "original_pose": brick_to_fix['detected_pose'],
+                "result": result
+            })
+            
+            if result.get("action_taken"):
+                corrections_made += 1
+                # 修复后重新触发 SAM3 检测
+                if self.sam3_segmenter is not None:
+                    self.sam3_segmenter.trigger_segment()
+                    print(f"[POSE_CHECK] Re-triggered SAM3 for verification")
+            else:
+                print(f"[POSE_CHECK] No action taken for brick {brick_to_fix['brick_id']}")
+                break
+        
+        # 最终检查
+        self._wait(0.8)
+        final_analysis = self.analyze_brick_poses_from_sam3_cache()
+        all_flat = all(not a['needs_correction'] for a in final_analysis) if final_analysis else True
+        
+        return {
+            "corrections_made": corrections_made,
+            "all_flat": all_flat,
+            "details": details
+        }
+    
     # ------------ Main FSM ------------
     def execute_fsm(self, wps, aux, assist_cfg, brick_id, ground_id, support_ids=None):
         if not self.rm.tcp_calibrated:

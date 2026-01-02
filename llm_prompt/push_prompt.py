@@ -1,3 +1,16 @@
+import numpy as np
+
+# ========== 推动距离配置 - 修改这里即可 ==========
+PUSH_DISTANCE_MIN = 0.12          # 最小推动距离 (米)
+PUSH_DISTANCE_RECOMMENDED = 0.15  # 推荐推动距离 (米) 
+PUSH_DISTANCE_MAX = 0.20          # 最大推动距离 (米)
+
+# ========== 接近距离配置 - 防止撞倒砖块 ==========
+APPROACH_OFFSET = 0.12            # 接近位置距离砖块中心的偏移 (米)
+PUSH_START_OFFSET = 0.06          # 推动起始位置距离砖块中心的偏移 (米)
+# 注意：PUSH_START_OFFSET 越大，开始推动时离砖块越远
+# ================================================
+
 PUSH_TOPPLE_REPLY_TEMPLATE = """{
   "pose_analysis": {
     "detected_pose": "flat|side|upright",
@@ -9,11 +22,11 @@ PUSH_TOPPLE_REPLY_TEMPLATE = """{
   "push_plan": {
     "approach_pose": {
       "xyz": [<approach_x>, <approach_y>, <approach_z>],
-      "rpy": [0.0, 0.0, <yaw_facing_brick>]
+      "rpy": [3.14159, 0.0, 0.0]
     },
     "push_start_pose": {
       "xyz": [<start_x>, <start_y>, <start_z>],
-      "rpy": [0.0, 0.0, <yaw>]
+      "rpy": [3.14159, 0.0, 0.0]
     },
     "push_direction": [<dx>, <dy>, 0.0],
     "push_distance": <float in meters>,
@@ -23,7 +36,7 @@ PUSH_TOPPLE_REPLY_TEMPLATE = """{
   },
   "retreat_pose": {
     "xyz": [<retreat_x>, <retreat_y>, <retreat_z>],
-    "rpy": [0.0, 0.0, <yaw>]
+    "rpy": [3.14159, 0.0, 0.0]
   },
   "expected_result": {
     "final_pose": "flat",
@@ -35,14 +48,6 @@ PUSH_TOPPLE_REPLY_TEMPLATE = """{
 def get_push_topple_prompt(context: dict, attempt_idx: int = 0, feedback: str = "") -> tuple:
     """
     Generate push topple phase prompt.
-    
-    Args:
-        context: Dictionary containing brick, gripper, constraints, and robot state
-        attempt_idx: Current attempt number for retry logic
-        feedback: Error feedback from previous attempts
-    
-    Returns:
-        Tuple of (system_prompt, user_prompt)
     """
     # Extract brick information
     brick_pos = context["brick"]["pos"]
@@ -50,6 +55,20 @@ def get_push_topple_prompt(context: dict, attempt_idx: int = 0, feedback: str = 
     L, W, H = brick_size
     measured_height = context["brick"].get("measured_height", brick_pos[2])
     mask_area = context["brick"].get("mask_area", 0)
+    
+    # ========== 关键：获取 SAM3 估算的 yaw 角度 ==========
+    estimated_yaw = context["brick"].get("estimated_yaw", 0.0)
+    estimated_yaw_deg = np.degrees(estimated_yaw)
+    
+    # SAM3 检测到的长边方向
+    long_axis_x = np.cos(estimated_yaw)
+    long_axis_y = np.sin(estimated_yaw)
+    
+    # ⭐⭐⭐ 核心修正：推动方向应该是 **垂直于** 检测到的长边方向 ⭐⭐⭐
+    # 垂直方向 = 旋转90度 = (-sin(yaw), cos(yaw), 0)
+    # 这样才能真正推倒砖块，而不是沿着长边摩擦
+    push_dir_x = -np.sin(estimated_yaw)  # 垂直于长边
+    push_dir_y = np.cos(estimated_yaw)   # 垂直于长边
     
     # Robot state
     tcp_xyz = context["now"]["tcp_xyz"]
@@ -62,28 +81,42 @@ def get_push_topple_prompt(context: dict, attempt_idx: int = 0, feedback: str = 
     # Gripper info
     tip_length = context["gripper"].get("measured_tip_length") or context["gripper"].get("tip_length_guess", 0.05)
     
+    # ========== 计算预设位置（供 LLM 参考） ==========
+    # 接近位置：在砖块中心的反推动方向上，距离 APPROACH_OFFSET
+    approach_x = brick_pos[0] - push_dir_x * APPROACH_OFFSET
+    approach_y = brick_pos[1] - push_dir_y * APPROACH_OFFSET
+    
+    # 推动起始位置：在砖块中心的反推动方向上，距离 PUSH_START_OFFSET
+    # 这个位置应该刚好在砖块边缘外侧
+    push_start_x = brick_pos[0] - push_dir_x * PUSH_START_OFFSET
+    push_start_y = brick_pos[1] - push_dir_y * PUSH_START_OFFSET
+    
     task = f"""
 ## (1) Current Environment State
 
 **Brick Geometry (IMPORTANT - memorize these values):**
 - Brick dimensions: L={L:.4f}m (longest), W={W:.4f}m (medium), H={H:.4f}m (shortest)
-- When lying flat (normal): height ≈ H = {H:.4f}m, top face area = L×W (largest)
-- When on side: height ≈ W = {W:.4f}m, top face area = L×H (medium)  
-- When upright: height ≈ L = {L:.4f}m, top face area = W×H (smallest)
+- When lying flat (normal): centroid height ≈ H/2 = {H/2:.4f}m
+- When on side: centroid height ≈ W/2 = {W/2:.4f}m
+- When upright: centroid height ≈ L/2 = {L/2:.4f}m
 
 **Detected Brick State:**
 - Brick centroid position: ({brick_pos[0]:.4f}, {brick_pos[1]:.4f}, {brick_pos[2]:.4f})m
-- Measured top surface height: {measured_height:.4f}m
+- Measured centroid height: {brick_pos[2]:.4f}m
 - Detected mask area: {mask_area} pixels
 
+**⭐ CRITICAL: Brick Orientation from SAM3 ⭐**
+- Estimated yaw angle: {estimated_yaw:.4f} rad ({estimated_yaw_deg:.1f}°)
+- Detected long edge direction: ({long_axis_x:.4f}, {long_axis_y:.4f}, 0)
+- **PUSH direction (perpendicular to long edge):** ({push_dir_x:.4f}, {push_dir_y:.4f}, 0)
+
 **Expected Heights for Pose Classification:**
-- Flat (normal): centroid_z ≈ {H/2:.4f}m (half of H)
-- On side: centroid_z ≈ {W/2:.4f}m (half of W)
-- Upright: centroid_z ≈ {L/2:.4f}m (half of L)
+- Flat (normal): centroid_z ≈ {H/2:.4f}m (half of H={H:.4f}m)
+- On side: centroid_z ≈ {W/2:.4f}m (half of W={W/2:.4f}m)
+- Upright: centroid_z ≈ {L/2:.4f}m (half of L={L:.4f}m)
 
 **Robot State:**
 - Current TCP position: ({tcp_xyz[0]:.4f}, {tcp_xyz[1]:.4f}, {tcp_xyz[2]:.4f})m
-- Current TCP orientation (rpy): ({tcp_rpy[0]:.4f}, {tcp_rpy[1]:.4f}, {tcp_rpy[2]:.4f})rad
 - Gripper tip length: {tip_length:.4f}m
 
 **Environment:**
@@ -102,85 +135,107 @@ def get_push_topple_prompt(context: dict, attempt_idx: int = 0, feedback: str = 
 
 ## (3) Role Definition
 
-You are a **Brick Pose Correction Expert Agent**, responsible for analyzing brick orientation and planning push actions to topple standing bricks.
+You are a **Brick Pose Correction Expert Agent**. Your task is to:
+1. Determine if the brick needs correction based on its height
+2. Plan a push action **PERPENDICULAR to the detected long edge** to topple the brick
 
-**Your Tasks:**
-1. **Pose Analysis**: Determine if brick is "flat", "side", or "upright" based on measured height
-2. **Push Direction**: Calculate which direction to push to make the brick fall onto its L×W face
-3. **Approach Position**: Determine where the gripper should position before pushing
-4. **Push Parameters**: Calculate push distance, height, and speed
+## (4) Knowledge Base - PUSH DIRECTION CALCULATION
 
-## (4) Knowledge Base
+**⭐⭐⭐ KEY INSIGHT: Push PERPENDICULAR to the long edge ⭐⭐⭐**
 
-**Pose Classification Logic:**
-- Compare measured centroid height with expected values:
-  - If centroid_z ≈ H/2 ({H/2:.4f}m) ± 0.02m → brick is FLAT (no action needed)
-  - If centroid_z ≈ W/2 ({W/2:.4f}m) ± 0.02m → brick is on SIDE
-  - If centroid_z ≈ L/2 ({L/2:.4f}m) ± 0.02m → brick is UPRIGHT
+To topple a standing brick, you must push it **perpendicular to its long edge**.
+- Long edge direction from SAM3: ({long_axis_x:.4f}, {long_axis_y:.4f}, 0)
+- Push direction = rotate 90°: ({push_dir_x:.4f}, {push_dir_y:.4f}, 0)
 
-**Push Physics:**
-- To topple a brick, push at approximately 2/3 of its current height
-- Push perpendicular to the face you want to become the base
-- For SIDE brick: push along ±Y direction (perpendicular to L axis) to rotate around L axis
-- For UPRIGHT brick: push along ±X direction (perpendicular to W axis) to rotate around W axis
+**Why perpendicular?**
+- Pushing along the long edge just "scrapes" the side face - the brick won't fall
+- Pushing perpendicular applies torque around the bottom edge, causing rotation and toppling
 
-**Approach Strategy:**
-- Approach from the side opposite to push direction
-- Keep gripper at push_height = 2/3 × current_brick_height
-- Maintain safe distance before initiating push
+```
+    Long edge direction: →
+    
+    ┌──────────────┐      Push ↓ (perpendicular)
+    │              │            ↓
+    │    BRICK     │      ──────────────
+    │              │      Brick falls flat!
+    └──────────────┘
+```
 
-**Push Distance Calculation:**
-- For SIDE: push_distance ≈ W/2 to W (to overcome center of gravity)
-- For UPRIGHT: push_distance ≈ L/3 to L/2 (taller objects need less push)
+**⭐⭐⭐ IMPORTANT: Safe Distance from Brick ⭐⭐⭐**
+
+To avoid accidentally knocking the brick before pushing:
+- Approach offset: {APPROACH_OFFSET}m (distance from brick center when approaching)
+- Push start offset: {PUSH_START_OFFSET}m (distance from brick center when starting push)
+
+For UPRIGHT brick (height ≈ L/2 = {L/2:.4f}m), the brick is very unstable!
+- Keep larger distance to avoid accidental contact
+- Push start should be at least {PUSH_START_OFFSET}m away from brick center
+
+**Approach Position Calculation:**
+To push in direction ({push_dir_x:.4f}, {push_dir_y:.4f}, 0), approach from the opposite side:
+- approach_x = brick_x - push_dir_x × {APPROACH_OFFSET} = {approach_x:.4f}
+- approach_y = brick_y - push_dir_y × {APPROACH_OFFSET} = {approach_y:.4f}
+- approach_z = 0.15m (safe height)
+
+**Push Start Position (KEEP SAFE DISTANCE!):**
+- push_start_x = brick_x - push_dir_x × {PUSH_START_OFFSET} = {push_start_x:.4f}
+- push_start_y = brick_y - push_dir_y × {PUSH_START_OFFSET} = {push_start_y:.4f}
+- push_start_z = ground_z + push_contact_height
+
+**Push Contact Height:**
+- push_contact_height ≈ 60-70% of current brick height above ground
+- For SIDE: contact at ~{0.65 * W:.4f}m
+- For UPRIGHT: contact at ~{0.65 * L:.4f}m
+
+**Push Distance (IMPORTANT - must be sufficient to topple):**
+- For SIDE brick: push_distance = {PUSH_DISTANCE_RECOMMENDED}m ({PUSH_DISTANCE_RECOMMENDED*100:.0f}cm, ensure complete topple)
+- For UPRIGHT brick: push_distance = {PUSH_DISTANCE_RECOMMENDED}m ({PUSH_DISTANCE_RECOMMENDED*100:.0f}cm, ensure complete topple)
+- Minimum push distance: {PUSH_DISTANCE_MIN}m
+- Maximum push distance: {PUSH_DISTANCE_MAX}m
 
 ## (5) Thinking Chain
 
 **Step 1: Classify Current Pose**
 - Measured centroid height: {brick_pos[2]:.4f}m
-- Compare with: H/2={H/2:.4f}m, W/2={W/2:.4f}m, L/2={L/2:.4f}m
-- Determine: is brick "flat", "side", or "upright"?
+- Compare with: H/2={H/2:.4f}m (flat), W/2={W/2:.4f}m (side), L/2={L/2:.4f}m (upright)
+- Tolerance: ±0.015m
 
-**Step 2: If Not Flat, Determine Push Strategy**
-- For SIDE: 
-  - Current ground contact face: L×H
-  - Target ground contact face: L×W  
-  - Rotation axis: L (along X if brick aligned with X)
-  - Push direction: ±Y
-  
-- For UPRIGHT:
-  - Current ground contact face: W×H
-  - Target ground contact face: L×W
-  - Rotation axis: W (along Y if brick aligned with Y)  
-  - Push direction: ±X
+**Step 2: If Not Flat, Calculate Push Strategy**
+- Brick long edge direction from SAM3: ({long_axis_x:.4f}, {long_axis_y:.4f}, 0)
+- **Push direction (PERPENDICULAR):** ({push_dir_x:.4f}, {push_dir_y:.4f}, 0) or ({-push_dir_x:.4f}, {-push_dir_y:.4f}, 0)
+- Choose direction that pushes toward open space
 
-**Step 3: Calculate Approach Position**
-- approach_x = brick_x + (offset based on push direction)
-- approach_y = brick_y + (offset based on push direction)
-- approach_z = safe height for approach (≥ 0.15m)
-
-**Step 4: Calculate Push Execution**
-- push_start_z = ground_z + push_contact_height
-- push_direction = unit vector of push
-- push_distance = calculated distance to topple
+**Step 3: Calculate Positions (USE PROVIDED VALUES!)**
+Using push_direction = ({push_dir_x:.4f}, {push_dir_y:.4f}, 0):
+- approach_xyz = ({approach_x:.4f}, {approach_y:.4f}, 0.15)
+- push_start_xyz = ({push_start_x:.4f}, {push_start_y:.4f}, ground_z + contact_height)
+- push_distance = {PUSH_DISTANCE_RECOMMENDED} ({PUSH_DISTANCE_RECOMMENDED*100:.0f}cm for reliable topple)
 
 ## (6) Output Format
 
-**Output JSON with the following structure:**
+**Output JSON:**
 {PUSH_TOPPLE_REPLY_TEMPLATE}
 
 **Constraints:**
 1. All coordinates in meters
 2. approach_z should be safe height (≥ 0.15m)
-3. push_contact_height should be about 60-70% of current brick height
-4. push_direction must be a unit vector (or close to it)
-5. If brick is already flat, set action_required=false and push_plan can be null
-6. **Output valid JSON only, no markdown code blocks**
+3. push_contact_height ≈ 60-70% of current brick height above ground
+4. **push_direction MUST be PERPENDICULAR to long edge: ({push_dir_x:.4f}, {push_dir_y:.4f}, 0) or ({-push_dir_x:.4f}, {-push_dir_y:.4f}, 0)**
+5. **push_distance MUST be at least {PUSH_DISTANCE_MIN}m, recommended {PUSH_DISTANCE_RECOMMENDED}m ({PUSH_DISTANCE_RECOMMENDED*100:.0f}cm)**
+6. **approach position offset MUST be at least {APPROACH_OFFSET}m from brick center**
+7. **push_start position offset MUST be at least {PUSH_START_OFFSET}m from brick center**
+8. All rpy values should be [3.14159, 0.0, 0.0] (gripper pointing down)
+9. If brick is already flat, set action_required=false
+10. **Output valid JSON only, no markdown code blocks**
 """.strip()
 
     system = (
         "You are a robotic manipulation expert specialized in correcting brick poses. "
-        "Analyze the brick orientation and plan a push action to topple standing bricks. "
-        "Output valid JSON only with carefully calculated positions in meters."
+        "To topple a brick, push PERPENDICULAR to its detected long edge. "
+        "The push direction must be (-sin(yaw), cos(yaw), 0) or (sin(yaw), -cos(yaw), 0). "
+        f"Push distance should be at least {PUSH_DISTANCE_MIN}m, recommended {PUSH_DISTANCE_RECOMMENDED}m for reliable toppling. "
+        f"IMPORTANT: Keep safe distance from brick - approach offset {APPROACH_OFFSET}m, push start offset {PUSH_START_OFFSET}m. "
+        "Output valid JSON only with precise positions in meters."
     )
     
     return system, task

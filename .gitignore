@@ -1,6 +1,7 @@
-# API Keys and Secrets
-configs/kuka_six_bricks.yaml
-modules/__pycache__/
-control/__pycache__/
-env/__pycache__/
-planning/__pycache__/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.py[cod]
+*$py.class

@@ -1,5 +1,6 @@
 import pybullet as p
 import numpy as np
+import time
 from env.pyb_env import BulletEnv
 from modules.grasp_module import GraspModule
 from control.gripper import GripperHelper
@@ -28,20 +29,6 @@ def main():
     print(f"[INIT] 砖块高度: {brick_height}")
 
     # ============ 初始化 SAM3 实时分割系统 ============
-    # sam3_segmenter = SAM3BrickSegmenter(
-    #     camera_position=(1.6, -1.2, 1.5),
-    #     camera_target=(0.4, 0.0, 0.2),
-    #     width=640,
-    #     height=480,
-    #     fov=78.0,
-    #     checkpoint_path="/home/ypf/sam3-main/checkpoint/sam3.pt",
-    #     text_prompt="red building block",
-    #     sam_resolution=1008,
-    #     confidence_threshold=0.4,
-    #     use_opengl=True,
-    #     brick_body_ids=brick_body_ids,
-    #     brick_height=brick_height,
-    # )
     sam3_segmenter = SAM3BrickSegmenter(
         camera_position=(0.0, 0.0, 2.0),
         camera_target=(0.0, 0.0, 0.2),
@@ -77,44 +64,59 @@ def main():
         sam3_segmenter=sam3_segmenter,
         eye_in_hand=eye_in_hand,
         display_fps=15,
-        combined_view=True  # 合并成一个窗口
+        combined_view=True
     )
     display_manager.start()
 
     print("\n[INIT] 执行初始 SAM3 分割，获取砖块位置...")
     sam3_segmenter.trigger_segment()
-    # 等待分割完成（给后台线程一点时间）
-    import time
-    time.sleep(1.5)  # 等待 SAM3 分割完成并打印结果
-    print("[INIT] 初始分割完成，开始任务执行\n")
+    time.sleep(1.5)  # 等待 SAM3 分割完成
+    print("[INIT] 初始分割完成\n")
+
+    # ============ 【新增】初始姿态检测和修复 ============
+    print("[INIT] 检查砖块初始姿态...")
+    # 创建临时 MotionExecutor 用于初始姿态检测
+    init_vf = StateVerifier(env, rm, gripper, env.ground_id)
+    init_motion = MotionExecutor(
+        env, rm, gripper, init_vf,
+        sam3_segmenter=sam3_segmenter,
+        eye_in_hand_camera=eye_in_hand
+    )
+    
+    init_pose_result = init_motion.check_and_correct_all_brick_poses(max_corrections=6)
+    
+    if init_pose_result["corrections_made"] > 0:
+        print(f"[INIT] 初始姿态修复完成: {init_pose_result['corrections_made']} 次修复")
+        for detail in init_pose_result["details"]:
+            status = "✓" if detail['result'].get('success') else "✗"
+            print(f"   {status} Brick {detail['brick_id']}: {detail['original_pose']}")
+        
+        # 修复后回到初始位置，并重新触发 SAM3
+        init_motion.reset_between_tasks()
+        reset_sec = env.cfg["timing"].get("reset_wait_sec", 1.5)
+        env.step(int(reset_sec / env.dt))
+    
+    if not init_pose_result["all_flat"]:
+        print("[INIT] ⚠️ 部分砖块仍未恢复平放状态，继续执行任务...")
+    else:
+        print("[INIT] ✓ 所有砖块姿态正常，开始任务执行\n")
 
     # ============ QP 调度器初始化 ============
     qp_scheduler = QPTaskScheduler(
         env, 
-        threshold_low=0.055,      # 55mm 以下不修复
-        threshold_critical=0.1   # 100mm 以上必须修复
+        threshold_low=0.055,
+        threshold_critical=0.1
     )
 
     # ============ 任务状态跟踪 ============
-    # original_sequence 已在上面获取
-    
-    # 已放置砖块信息
     placed_bricks_info = []
-    
-    # 已完成的砖块集合
     completed_bricks = set()
-    
-    # 统计
     success_count = 0
     failed_count = 0
     repair_count = 0
     temp_count = 0
     total_tasks_executed = 0
-    
-    # 任务队列
     task_queue = []
-    
-    # 【新增】当前是否正在抓取砖块
     is_holding_brick = False
     held_brick_idx = None
 
@@ -123,7 +125,42 @@ def main():
         if not display_manager.is_running():
             print("[MAIN] Display manager stopped, exiting...")
             break
-        # 【修复】检查是否真正完成：所有砖块都放置完成，且没有砖块在临时位置
+            
+        # ======== 【新增】步骤 0: 每轮循环开始前检测砖块姿态 ========
+        # 利用前一轮 reset_between_tasks 或初始化时触发的 SAM3 缓存
+        if sam3_segmenter is not None and not is_holding_brick:
+            # 等待 SAM3 分割完成
+            time.sleep(0.5)
+            
+            # 创建临时 MotionExecutor 用于姿态检测
+            temp_vf = StateVerifier(env, rm, gripper, env.ground_id)
+            temp_motion = MotionExecutor(
+                env, rm, gripper, temp_vf,
+                sam3_segmenter=sam3_segmenter,
+                eye_in_hand_camera=eye_in_hand
+            )
+            
+            print(f"\n[POSE_CHECK] 分析 SAM3 缓存中的砖块姿态...")
+            pose_check_result = temp_motion.check_and_correct_all_brick_poses(max_corrections=3)
+            
+            if pose_check_result["corrections_made"] > 0:
+                print(f"[POSE_CHECK] 完成 {pose_check_result['corrections_made']} 次姿态修复")
+                for detail in pose_check_result["details"]:
+                    status = "✓" if detail['result'].get('success') else "✗"
+                    print(f"   {status} Brick {detail['brick_id']}: {detail['original_pose']}")
+                
+                # 修复后回到初始位置
+                temp_motion.reset_between_tasks()
+                reset_sec = env.cfg["timing"].get("reset_wait_sec", 1.5)
+                env.step(int(reset_sec / env.dt))
+                # 注意：reset_between_tasks 会触发 SAM3，下次循环会用新缓存
+            
+            if not pose_check_result["all_flat"]:
+                print(f"[POSE_CHECK] ⚠️ 部分砖块仍未平放，继续执行任务...")
+            else:
+                print(f"[POSE_CHECK] ✓ 所有砖块姿态正常")
+        
+        # 【修复】检查是否真正完成
         all_placed = len(completed_bricks) >= len(original_sequence)
         no_temp_bricks = len(qp_scheduler.bricks_in_temp) == 0
         no_pending_tasks = len(task_queue) == 0
@@ -134,15 +171,11 @@ def main():
         
         # ======== 步骤 1: 规划/更新任务队列 ========
         if len(task_queue) == 0:
-            # 计算剩余需要放置的砖块
             remaining = [idx for idx in original_sequence if idx not in completed_bricks]
-            
-            # 【修复】如果有砖块在临时位置，也需要处理
             temp_bricks_to_restore = list(qp_scheduler.bricks_in_temp.keys())
             
             if remaining or temp_bricks_to_restore:
                 current_brick_idx = remaining[0] if remaining else temp_bricks_to_restore[0]
-                
                 qp_scheduler.update_placed_bricks(placed_bricks_info)
                 
                 try:
@@ -153,10 +186,8 @@ def main():
                     )
                 except RuntimeError as e:
                     print(f"[ERROR] MILP solver failed: {e}")
-                    print("[ERROR] Cannot continue without valid task plan!")
                     break
             else:
-                # 所有原始任务完成，检查是否需要最终修复
                 qp_scheduler.update_placed_bricks(placed_bricks_info)
                 if qp_scheduler.should_replan():
                     bricks_to_repair = qp_scheduler.get_bricks_needing_repair()
@@ -175,10 +206,8 @@ def main():
                     break
         
         if len(task_queue) == 0:
-            # 【修复】再次检查是否有临时位置的砖块
             if len(qp_scheduler.bricks_in_temp) > 0:
                 print(f"[WARNING] Still have bricks in temp: {list(qp_scheduler.bricks_in_temp.keys())}")
-                print("[WARNING] Forcing restore of temp bricks...")
                 remaining = [idx for idx in original_sequence if idx not in completed_bricks]
                 try:
                     task_queue = qp_scheduler.plan_task_sequence(
@@ -211,44 +240,31 @@ def main():
         print(f"   Target Pose: {goal_pose}")
         print(f"   Is Temp Position: {is_temp}")
         print(f"   Reason: {current_task.reason}")
-        print(f"   Estimated Cost: {current_task.estimated_cost:.1f}s")
         print(f"   Queue remaining: {len(task_queue)}")
-        print(f"   Currently holding: {held_brick_idx}")
         
-        # ========== 【新增】步骤 2.5: 执行前检测 - 检查依赖是否被破坏 ==========
+        # ======== 步骤 2.5: 执行前检测 ========
         if task_type in [TaskType.NORMAL_PLACE] and not is_temp and not is_holding_brick:
             print(f"\n[PRE-CHECK] Checking placed bricks before executing task...")
             qp_scheduler.update_placed_bricks(placed_bricks_info)
             
-            # 获取当前砖块的所有依赖
             ancestors = qp_scheduler.get_all_ancestors(brick_idx)
-            
-            # 检查依赖砖块的状态
             bricks_needing_repair = qp_scheduler.get_bricks_needing_repair()
             repair_set = {d["brick_idx"] for d in bricks_needing_repair}
             temp_set = set(qp_scheduler.bricks_in_temp.keys())
-            
-            # 如果任何依赖砖块需要修复或在临时位置
             problem_ancestors = ancestors & (repair_set | temp_set)
             
             if problem_ancestors:
                 print(f"[PRE-CHECK] ⚠️ Dependencies {problem_ancestors} have problems!")
-                print(f"[PRE-CHECK] 🔄 Re-planning task sequence...")
-                
                 remaining = [idx for idx in original_sequence if idx not in completed_bricks]
                 
                 try:
-                    # 重新规划
                     new_task_queue = qp_scheduler.plan_task_sequence(
                         current_brick_idx=brick_idx,
                         remaining_sequence=remaining,
                         is_holding_brick=is_holding_brick
                     )
-                    
-                    # 用新规划替换当前队列
                     task_queue = new_task_queue
                     
-                    # 取新的第一个任务
                     if task_queue:
                         current_task = task_queue.pop(0)
                         brick_idx = current_task.brick_idx
@@ -258,19 +274,13 @@ def main():
                         level = current_task.level
                         is_temp = current_task.is_temp
                         level_name = env.get_level_name(brick_idx)
-                        
                         print(f"[PRE-CHECK] ✓ New first task: {task_type.value} brick={brick_idx}")
-                        print(f"   New Target Pose: {goal_pose}")
-                        print(f"   Is Temp: {is_temp}")
                     else:
-                        print(f"[PRE-CHECK] ⚠️ No tasks after re-planning, continuing loop...")
                         continue
-                        
                 except RuntimeError as e:
                     print(f"[PRE-CHECK] ❌ Re-planning failed: {e}")
-                    print(f"[PRE-CHECK] Continuing with original task...")
             else:
-                print(f"[PRE-CHECK] ✓ All dependencies OK, proceeding with task")
+                print(f"[PRE-CHECK] ✓ All dependencies OK")
         
         # ======== 步骤 3: 准备并执行任务 ========
         vf = StateVerifier(env, rm, gripper, brick_id)
@@ -287,10 +297,8 @@ def main():
         else:
             support_ids = env.get_related_support_ids(brick_idx)
         
-        # 执行任务
         result = motion.execute_fsm(wps, aux, assist_cfg, brick_id, env.ground_id, support_ids=support_ids)
         
-        # 兼容处理
         if isinstance(result, bool):
             result = {"success": result, "holding_brick": False, "failed_phase": None, "brick_released": result}
         
@@ -306,10 +314,8 @@ def main():
             if task_type == TaskType.TEMP_PLACE:
                 temp_count += 1
                 print(f"📦 [TEMP SUCCESS] Brick idx={brick_idx} moved to temp position!")
-                
                 qp_scheduler.mark_brick_in_temp(brick_idx, goal_pose[:3])
                 
-                # 更新 placed_bricks_info
                 found = False
                 for info in placed_bricks_info:
                     if info["brick_idx"] == brick_idx:
@@ -320,21 +326,16 @@ def main():
                         break
                 if not found:
                     placed_bricks_info.append({
-                        "brick_id": brick_id,
-                        "brick_idx": brick_idx,
-                        "expected_pos": goal_pose[:3],
-                        "expected_orn": goal_pose[3:],
-                        "level": level,
-                        "is_temp": True
+                        "brick_id": brick_id, "brick_idx": brick_idx,
+                        "expected_pos": goal_pose[:3], "expected_orn": goal_pose[3:],
+                        "level": level, "is_temp": True
                     })
                     
             elif task_type == TaskType.REPAIR_PLACE:
                 repair_count += 1
                 print(f"✅ [REPAIR SUCCESS] Brick idx={brick_idx} repaired!")
-                
                 qp_scheduler.unmark_brick_from_temp(brick_idx)
                 
-                # 更新信息
                 found = False
                 for info in placed_bricks_info:
                     if info["brick_idx"] == brick_idx:
@@ -343,18 +344,13 @@ def main():
                         info["is_temp"] = False
                         found = True
                         break
-                
                 if not found:
                     placed_bricks_info.append({
-                        "brick_id": brick_id,
-                        "brick_idx": brick_idx,
-                        "expected_pos": goal_pose[:3],
-                        "expected_orn": goal_pose[3:],
-                        "level": level,
-                        "is_temp": False
+                        "brick_id": brick_id, "brick_idx": brick_idx,
+                        "expected_pos": goal_pose[:3], "expected_orn": goal_pose[3:],
+                        "level": level, "is_temp": False
                     })
                 
-                # 【修复】修复任务完成后，标记为已完成
                 if brick_idx in original_sequence:
                     completed_bricks.add(brick_idx)
                     
@@ -366,26 +362,22 @@ def main():
                 found = any(info["brick_idx"] == brick_idx for info in placed_bricks_info)
                 if not found:
                     placed_bricks_info.append({
-                        "brick_id": brick_id,
-                        "brick_idx": brick_idx,
-                        "expected_pos": goal_pose[:3],
-                        "expected_orn": goal_pose[3:],
-                        "level": level,
-                        "is_temp": False
+                        "brick_id": brick_id, "brick_idx": brick_idx,
+                        "expected_pos": goal_pose[:3], "expected_orn": goal_pose[3:],
+                        "level": level, "is_temp": False
                     })
         else:
             failed_count += 1
             print(f"❌ [FAILED] {level_name} (brick {brick_idx}) Failed at phase: {result.get('failed_phase', 'unknown')}")
             
             if result["holding_brick"]:
-                print(f"⚠️ [WARNING] Still holding brick {brick_idx}! Need to handle it first.")
+                print(f"⚠️ [WARNING] Still holding brick {brick_idx}!")
                 is_holding_brick = True
                 held_brick_idx = brick_idx
             else:
                 is_holding_brick = False
                 held_brick_idx = None
         
-        # 进度
         print(f"[Progress] Completed: {len(completed_bricks)}/{len(original_sequence)}, "
               f"Failed: {failed_count}, Repairs: {repair_count}, Temp: {temp_count}")
         
@@ -393,12 +385,11 @@ def main():
         settle_sec = env.cfg["timing"].get("brick_settle_sec", 2.0)
         env.step(int(settle_sec / env.dt))
         
-        # ======== 步骤 5: 检查是否需要重新规划 ========
+        # ======== 步骤 5: 重新规划检查 ========
         qp_scheduler.update_placed_bricks(placed_bricks_info)
         
         if qp_scheduler.should_replan() and len(task_queue) > 0:
-            print(f"\n[QP] ⚠️ Deviation detected! Re-planning task sequence...")
-            
+            print(f"\n[QP] ⚠️ Deviation detected! Re-planning...")
             next_brick_idx = task_queue[0].brick_idx if task_queue else None
             remaining = [idx for idx in original_sequence if idx not in completed_bricks]
             
@@ -410,12 +401,11 @@ def main():
                 )
             except RuntimeError as e:
                 print(f"[ERROR] Re-planning MILP failed: {e}")
-                print("[WARNING] Continuing with remaining tasks in queue...")
         
-        # 重置机械臂
+        # ======== 步骤 6: 重置机械臂（触发 SAM3） ========
         if len(task_queue) > 0 or len(completed_bricks) < len(original_sequence):
             print("Preparing for next task, resetting...")
-            motion.reset_between_tasks()
+            motion.reset_between_tasks()  # ← 这里会触发 SAM3
             reset_sec = env.cfg["timing"].get("reset_wait_sec", 1.5)
             env.step(int(reset_sec / env.dt))
 
@@ -429,26 +419,15 @@ def main():
     print(f"   - Failed: {failed_count}")
     print(f"   - Repairs Performed: {repair_count}")
     print(f"   - Temp Moves: {temp_count}")
-    print(f"   - Efficiency: {len(original_sequence)/total_tasks_executed*100:.1f}%" 
-          if total_tasks_executed > 0 else "N/A")
-    
-    if qp_scheduler.bricks_in_temp:
-        print(f"   ⚠️ Bricks still in temp: {list(qp_scheduler.bricks_in_temp.keys())}")
     
     if len(completed_bricks) == len(original_sequence):
         print("🎉 Perfect! All bricks placed successfully!")
-    elif len(completed_bricks) >= len(original_sequence) * 0.8:
-        print("👍 Great! Most bricks placed successfully!")
-    else:
-        print("🤔 Parameters and strategy need further optimization.")
     
     print(f"{'='*60}")
-    print("Keeping scene for inspection...")
     
     final_sec = env.cfg["timing"].get("final_wait_sec", 10.0)
     env.step(int(final_sec / env.dt))
 
-    # 关闭
     display_manager.close()
     sam3_segmenter.close()
     eye_in_hand.close()
