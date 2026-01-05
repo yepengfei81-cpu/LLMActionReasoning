@@ -363,10 +363,10 @@ import pybullet as p
 import numpy as np
 import time
 import concurrent.futures
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, List
 from modules.llm_planner import LLMPlanner, OpenAIChatClient, AsyncOpenAIChatClient
 from math3d.transforms import align_topdown_to_brick
-
+from llm_prompt.push_prompt import get_batch_pose_check_prompt, get_push_plan_prompt, AREA_THRESHOLD
 
 class MotionLLMHandler:
     def __init__(self, env, robot_model, gripper_helper, verifier):
@@ -718,85 +718,174 @@ class MotionLLMHandler:
             print("[LLM] Release failed, returning None for fallback")
             return None
 
-    def plan_push_topple(self, brick_info: Dict[str, Any], aux: Dict[str, Any] = None) -> Dict[str, Any]:
-        """非阻塞版本的 push_topple 规划"""
-        if self.llm_agent is None:
-            print("[PUSH_TOPPLE] LLM disabled, cannot plan push topple")
+    def plan_batch_pose_check(self, brick_list: List[Dict[str, Any]], aux: Dict[str, Any] = None) -> Dict[str, Any]:
+        """
+        批量判断所有砖块的姿态（一次 LLM 调用）
+        
+        Args:
+            brick_list: List of brick info dicts from analyze_brick_poses_from_sam3_cache()
+            aux: optional auxiliary info (ground_z, etc.)
+        
+        Returns:
+            {
+                "brick_analyses": [...],  # 每个砖块的分类结果
+                "summary": {...},         # 汇总信息
+                "source": "llm"
+            }
+        """
+        if self.llm_agent is None or len(brick_list) == 0:
+            print("[BATCH_POSE_CHECK] LLM disabled or no bricks")
             return {
-                "pose_analysis": {"detected_pose": "unknown"},
-                "action_required": False,
-                "push_plan": None,
-                "source": "llm_disabled"
+                "brick_analyses": [],
+                "summary": {
+                    "total_bricks": 0,
+                    "flat_count": 0,
+                    "stacked_count": 0,
+                    "needs_correction_count": 0,
+                    "first_to_fix_id": None
+                },
+                "source": "no_bricks"
             }
         
         aux = aux or {}
         L, W, H = self.env.cfg["brick"]["size_LWH"]
         ground_z = aux.get("ground_z", self.env.get_ground_top() if hasattr(self.env, 'get_ground_top') else 0.0)
         
-        # Get current TCP state
-        tcp_xyz, tcp_quat = self.rm.tcp_world_pose()
-        tcp_rpy = p.getEulerFromQuaternion(tcp_quat)
+        print(f"[BATCH_POSE_CHECK] Classifying {len(brick_list)} bricks in one LLM call...")
         
-        # Get gripper info
-        tip_guess = float(self.gcfg.get("finger_tip_length", 0.012))
-        tip_measured = self.rm.estimate_tip_length_from_tcp(fallback=tip_guess)
-        
-        # Get brick position
-        brick_pos = brick_info.get("pos") or brick_info.get("position")
-        if brick_pos is None:
-            print(f"[PUSH_TOPPLE] Error: brick_info missing position data")
-            return {
-                "pose_analysis": {"detected_pose": "unknown"},
-                "action_required": False,
-                "push_plan": None,
-                "source": "error_missing_position"
-            }
-        
-        estimated_yaw = brick_info.get("estimated_yaw", 0.0)
-        
-        context = {
-            "scene": {
-                "gravity": -9.81,
-                "time_step": self.env.dt,
-                "friction": {"ground": 0.5, "brick": 0.7}
-            },
-            "brick": {
-                "size_LWH": [L, W, H],
-                "pos": brick_pos,
-                "measured_height": brick_info.get("measured_height", brick_pos[2]),
-                "mask_area": brick_info.get("mask_area", 0),
-                "estimated_yaw": estimated_yaw,
-                "rpy": [0.0, 0.0, estimated_yaw]
-            },
-            "gripper": {
-                "tip_length_guess": tip_guess,
-                "measured_tip_length": tip_measured,
-                "finger_depth": float(self.gcfg.get("finger_depth", 0.035)),
-            },
-            "constraints": {
-                "ground_z": ground_z,
-                "safety_clearance": float(self.ccfg.get("approach", 0.08)),
-            },
-            "now": {
-                "tcp_xyz": list(tcp_xyz),
-                "tcp_rpy": list(tcp_rpy)
-            }
-        }
+        # 生成批量提示词
+        system, user = get_batch_pose_check_prompt(brick_list, [L, W, H], ground_z)
         
         # 非阻塞调用 LLM
-        print("[LLM] Starting non-blocking push_topple planning...")
-        result = self._call_llm_nonblocking(
-            self.llm_agent.plan_push_topple, context, 0, None
-        )
+        def _do_batch_check():
+            return self.llm_agent.client.complete(system, user)
         
-        if result is not None:
-            print(f"[LLM] Push topple result: action_required={result.get('action_required', False)}")
+        raw = self._call_llm_nonblocking(_do_batch_check)
+        
+        if raw is None:
+            print("[BATCH_POSE_CHECK] LLM call failed")
+            return {
+                "brick_analyses": [],
+                "summary": {"total_bricks": len(brick_list), "needs_correction_count": 0, "first_to_fix_id": None},
+                "source": "llm_failed"
+            }
+        
+        # 解析结果
+        result = self._parse_batch_pose_result(raw, brick_list)
+        
+        if result is not None and result.get("brick_analyses"):
+            summary = result.get("summary", {})
+            print(f"[BATCH_POSE_CHECK] Results: "
+                  f"total={summary.get('total_bricks', 0)}, "
+                  f"flat={summary.get('flat_count', 0)}, "
+                  f"stacked={summary.get('stacked_count', 0)}, "
+                  f"needs_fix={summary.get('needs_correction_count', 0)}")
             return result
         else:
-            print("[LLM] Push topple failed, returning no action")
+            print("[BATCH_POSE_CHECK] Failed to parse LLM response")
             return {
-                "pose_analysis": {"detected_pose": "unknown"},
-                "action_required": False,
-                "push_plan": None,
-                "source": "llm_timeout"
+                "brick_analyses": [],
+                "summary": {"total_bricks": len(brick_list), "needs_correction_count": 0, "first_to_fix_id": None},
+                "source": "parse_failed"
             }
+    
+    def _parse_batch_pose_result(self, raw_text: str, brick_list: List[Dict]) -> Dict[str, Any]:
+        """解析批量姿态检测的 LLM 返回结果"""
+        import json
+        import re
+        
+        # 尝试解析 JSON
+        try:
+            result = json.loads(raw_text)
+        except:
+            # 尝试提取 JSON
+            match = re.search(r'\{[\s\S]*\}', raw_text)
+            if match:
+                try:
+                    result = json.loads(match.group(0))
+                except:
+                    return None
+            else:
+                return None
+        
+        # 验证必要字段
+        if "brick_analyses" not in result:
+            return None
+        
+        result["source"] = "llm"
+        return result
+
+    def plan_push_action(self, brick_info: Dict[str, Any], aux: Dict[str, Any] = None) -> Dict[str, Any]:
+        """
+        为单个需要推倒的砖块规划推动动作
+        
+        Args:
+            brick_info: 砖块信息（包含 detected_pose）
+            aux: optional auxiliary info
+        
+        Returns:
+            {
+                "push_plan": {...},
+                "retreat_pose": {...},
+                "source": "llm"
+            }
+        """
+        if self.llm_agent is None:
+            print("[PUSH_PLAN] LLM disabled")
+            return {"push_plan": None, "source": "llm_disabled"}
+        
+        aux = aux or {}
+        L, W, H = self.env.cfg["brick"]["size_LWH"]
+        ground_z = aux.get("ground_z", self.env.get_ground_top() if hasattr(self.env, 'get_ground_top') else 0.0)
+        
+        brick_id = brick_info.get('brick_id', -1)
+        detected_pose = brick_info.get('detected_pose', 'unknown')
+        
+        print(f"[PUSH_PLAN] Planning push for brick {brick_id} (pose: {detected_pose})")
+        
+        # 生成推倒规划提示词
+        system, user = get_push_plan_prompt(brick_info, [L, W, H], ground_z)
+        
+        # 非阻塞调用 LLM
+        def _do_push_plan():
+            return self.llm_agent.client.complete(system, user)
+        
+        raw = self._call_llm_nonblocking(_do_push_plan)
+        
+        if raw is None:
+            print("[PUSH_PLAN] LLM call failed")
+            return {"push_plan": None, "source": "llm_failed"}
+        
+        # 解析结果
+        result = self._parse_push_plan_result(raw, brick_info)
+        
+        if result is not None and result.get("push_plan"):
+            pp = result["push_plan"]
+            print(f"[PUSH_PLAN] Success: approach=({pp['approach_pose']['xyz'][0]:.3f}, {pp['approach_pose']['xyz'][1]:.3f})")
+            return result
+        else:
+            print("[PUSH_PLAN] Failed to parse LLM response")
+            return {"push_plan": None, "source": "parse_failed"}
+    
+    def _parse_push_plan_result(self, raw_text: str, brick_info: Dict) -> Dict[str, Any]:
+        """解析推倒规划的 LLM 返回结果"""
+        import json
+        import re
+        
+        try:
+            result = json.loads(raw_text)
+        except:
+            match = re.search(r'\{[\s\S]*\}', raw_text)
+            if match:
+                try:
+                    result = json.loads(match.group(0))
+                except:
+                    return None
+            else:
+                return None
+        
+        if "push_plan" not in result:
+            return None
+        
+        result["source"] = "llm"
+        return result

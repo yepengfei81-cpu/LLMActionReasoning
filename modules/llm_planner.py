@@ -15,7 +15,6 @@ from llm_prompt import (
     get_place_prompt, PLACE_REPLY_TEMPLATE,
     get_release_prompt, RELEASE_REPLY_TEMPLATE,
     get_single_agent_prompt, SINGLE_AGENT_REPLY_TEMPLATE,  
-    get_push_topple_prompt, PUSH_TOPPLE_REPLY_TEMPLATE
 )
 
 
@@ -187,7 +186,6 @@ class LLMPlanner:
     PLACE_REPLY_TEMPLATE = PLACE_REPLY_TEMPLATE
     RELEASE_REPLY_TEMPLATE = RELEASE_REPLY_TEMPLATE
     SINGLE_AGENT_REPLY_TEMPLATE = SINGLE_AGENT_REPLY_TEMPLATE
-    PUSH_TOPPLE_REPLY_TEMPLATE = PUSH_TOPPLE_REPLY_TEMPLATE
 
     def __init__(self, client: Optional[BaseLLMClient] = None, 
                  enabled: bool = True,
@@ -1474,156 +1472,6 @@ Your output will directly control gripper opening and retreat sequence for safe 
             **result,
             "raw": raw
         }
-
-    def _prompt_push_topple(self, context: Dict[str, Any], 
-                            attempt_idx: int = 0, 
-                            feedback: Optional[str] = None) -> Tuple[str, str]:
-        """Generate push topple phase prompt"""
-        return get_push_topple_prompt(context, attempt_idx, feedback or "")
-
-    def _postprocess_push_topple(self, raw_text: str, context: Dict[str, Any]) -> Dict[str, Any]:
-        """Post-process push topple LLM output"""
-        jd = _extract_json(raw_text) or {}
-        
-        # Extract brick info for fallback
-        brick_pos = context["brick"]["pos"]
-        brick_size = context["brick"]["size_LWH"]
-        L, W, H = brick_size
-        
-        # Check pose analysis
-        pose_analysis = jd.get("pose_analysis", {})
-        detected_pose = pose_analysis.get("detected_pose", "unknown")
-        action_required = jd.get("action_required", True)
-        
-        # If parsing failed completely
-        if not pose_analysis or detected_pose == "unknown":
-            print("[PUSH_TOPPLE] Failed to parse LLM response")
-            return {
-                "pose_analysis": {
-                    "detected_pose": "unknown",
-                    "measured_centroid_z": brick_pos[2],
-                    "confidence": 0.0,
-                    "reasoning": "Failed to parse LLM response"
-                },
-                "action_required": False,
-                "push_plan": None,
-                "source": "parse_failed"
-            }
-        
-        # If brick is already flat
-        if detected_pose == "flat" or not action_required:
-            return {
-                "pose_analysis": pose_analysis,
-                "action_required": False,
-                "push_plan": None,
-                "source": "llm"
-            }
-        
-        # Parse push plan
-        push_plan = jd.get("push_plan", {})
-        retreat_pose = jd.get("retreat_pose", {})
-        expected_result = jd.get("expected_result", {})
-        
-        # Validate approach pose
-        approach_pose = push_plan.get("approach_pose", {})
-        approach_xyz = approach_pose.get("xyz", [brick_pos[0], brick_pos[1], 0.2])
-        approach_rpy = approach_pose.get("rpy", [0.0, 0.0, 0.0])
-        
-        # Validate push start pose
-        push_start_pose = push_plan.get("push_start_pose", {})
-        push_start_xyz = push_start_pose.get("xyz", approach_xyz)
-        push_start_rpy = push_start_pose.get("rpy", approach_rpy)
-        
-        # Validate push parameters
-        push_direction = push_plan.get("push_direction", [1.0, 0.0, 0.0])
-        push_distance = push_plan.get("push_distance", 0.05)
-        push_contact_height = push_plan.get("push_contact_height", brick_pos[2] * 0.6)
-        push_speed = push_plan.get("push_speed", "slow")
-        
-        # Validate retreat pose
-        retreat_xyz = retreat_pose.get("xyz", [brick_pos[0], brick_pos[1], 0.2])
-        retreat_rpy = retreat_pose.get("rpy", [0.0, 0.0, 0.0])
-        
-        return {
-            "pose_analysis": {
-                "detected_pose": detected_pose,
-                "measured_centroid_z": float(pose_analysis.get("measured_centroid_z", brick_pos[2])),
-                "confidence": float(pose_analysis.get("confidence", 0.8)),
-                "reasoning": pose_analysis.get("reasoning", "")
-            },
-            "action_required": True,
-            "push_plan": {
-                "approach_pose": {
-                    "xyz": [float(x) for x in approach_xyz],
-                    "rpy": [float(r) for r in approach_rpy]
-                },
-                "push_start_pose": {
-                    "xyz": [float(x) for x in push_start_xyz],
-                    "rpy": [float(r) for r in push_start_rpy]
-                },
-                "push_direction": [float(d) for d in push_direction],
-                "push_distance": float(push_distance),
-                "push_contact_height": float(push_contact_height),
-                "push_speed": push_speed,
-                "description": push_plan.get("description", "")
-            },
-            "retreat_pose": {
-                "xyz": [float(x) for x in retreat_xyz],
-                "rpy": [float(r) for r in retreat_rpy]
-            },
-            "expected_result": {
-                "final_pose": expected_result.get("final_pose", "flat"),
-                "expected_height_after": float(expected_result.get("expected_height_after", H/2))
-            },
-            "source": "llm"
-        }
-
-    def plan_push_topple(self, context: Dict[str, Any],
-                         attempt_idx: int = 0,
-                         feedback: Optional[str] = None) -> Dict[str, Any]:
-        """
-        Plan push action to topple a standing brick.
-        Same level as plan_pre_grasp, plan_descend, etc.
-        
-        Input: context with brick info including measured_height and mask_area
-        Output: {
-            "pose_analysis": {...},
-            "action_required": bool,
-            "push_plan": {...} or None,
-            "retreat_pose": {...},
-            "raw": <llm_text>,
-            "source": "llm|parse_failed|llm_disabled"
-        }
-        """
-        if not self.enabled or (self.client is None):
-            print("[PUSH_TOPPLE] LLM not enabled, cannot plan push topple")
-            return {
-                "pose_analysis": {"detected_pose": "unknown", "confidence": 0.0},
-                "action_required": False,
-                "push_plan": None,
-                "source": "llm_disabled"
-            }
-        
-        # Build prompt and call LLM
-        sys_prompt, user_prompt = self._prompt_push_topple(context, attempt_idx, feedback)
-        raw = self._complete_with_timeout(sys_prompt, user_prompt, phase="push_topple", context=context)
-        
-        # Post-process
-        result = self._postprocess_push_topple(raw, context)
-        result["raw"] = raw
-        
-        # Debug output
-        print(f"[LLM_PUSH_TOPPLE] ===== Push Topple Planning Results =====")
-        print(f"[LLM_PUSH_TOPPLE] Detected pose: {result['pose_analysis']['detected_pose']}")
-        print(f"[LLM_PUSH_TOPPLE] Action required: {result['action_required']}")
-        if result['action_required'] and result.get('push_plan'):
-            pp = result['push_plan']
-            print(f"[LLM_PUSH_TOPPLE] Approach position: ({pp['approach_pose']['xyz'][0]:.4f}, {pp['approach_pose']['xyz'][1]:.4f}, {pp['approach_pose']['xyz'][2]:.4f})")
-            print(f"[LLM_PUSH_TOPPLE] Push direction: ({pp['push_direction'][0]:.2f}, {pp['push_direction'][1]:.2f}, {pp['push_direction'][2]:.2f})")
-            print(f"[LLM_PUSH_TOPPLE] Push distance: {pp['push_distance']:.4f}m")
-        print(f"[LLM_PUSH_TOPPLE] Source: {result['source']}")
-        
-        return result
     
     def reset_cache(self):
         """Clear unified planning cache (called when processing new brick)"""
